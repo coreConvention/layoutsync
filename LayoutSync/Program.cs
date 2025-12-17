@@ -59,9 +59,19 @@ public class Program
             description: "Show what would happen without making changes")
         { IsRequired = false };
 
+        Option<bool> cleanOption = new(
+            aliases: ["--clean"],
+            description: "Delete orphaned documents from static collections (Sections, Layouts, Menus, Modals)")
+        { IsRequired = false };
+
         Option<bool> verboseOption = new(
             aliases: ["--verbose", "-v"],
             description: "Enable verbose logging")
+        { IsRequired = false };
+
+        Option<bool> preserveIdsOption = new(
+            aliases: ["--preserve-ids"],
+            description: "Preserve IDs from local files when creating documents (uses @metadata.@id for identities)")
         { IsRequired = false };
 
         // Create root command
@@ -75,7 +85,9 @@ public class Program
             validateOnlyOption,
             fixIdsOption,
             dryRunOption,
-            verboseOption
+            cleanOption,
+            verboseOption,
+            preserveIdsOption
         };
 
         rootCommand.SetHandler(
@@ -91,7 +103,9 @@ public class Program
                     ValidateOnly = context.ParseResult.GetValueForOption(validateOnlyOption),
                     FixIds = context.ParseResult.GetValueForOption(fixIdsOption),
                     DryRun = context.ParseResult.GetValueForOption(dryRunOption),
-                    Verbose = context.ParseResult.GetValueForOption(verboseOption)
+                    Clean = context.ParseResult.GetValueForOption(cleanOption),
+                    Verbose = context.ParseResult.GetValueForOption(verboseOption),
+                    PreserveIds = context.ParseResult.GetValueForOption(preserveIdsOption)
                 });
             });
 
@@ -191,13 +205,15 @@ public class Program
             else if (args.SyncOnce)
             {
                 Log.Information("Sync once mode - syncing all files...");
-                await syncService.SyncAllAsync(layoutsPath, args.Layout, args.DryRun);
+                if (args.Clean)
+                    Log.Information("Clean mode - orphaned documents will be deleted from static collections");
+                await syncService.SyncAllAsync(layoutsPath, args.Layout, args.DryRun, args.Clean);
             }
             else
             {
                 // Watch mode
                 Log.Information("Initial sync...");
-                await syncService.SyncAllAsync(layoutsPath, args.Layout, args.DryRun);
+                await syncService.SyncAllAsync(layoutsPath, args.Layout, args.DryRun, args.Clean);
 
                 Log.Information("Watching for changes... (Ctrl+C to stop)");
 
@@ -236,5 +252,7 @@ public class CommandLineArgs
     public bool ValidateOnly { get; init; }
     public bool FixIds { get; init; }
     public bool DryRun { get; init; }
+    public bool Clean { get; init; }
     public bool Verbose { get; init; }
+    public bool PreserveIds { get; init; }
 }

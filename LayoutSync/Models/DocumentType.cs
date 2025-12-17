@@ -2,45 +2,65 @@ namespace LayoutSync.Models;
 
 /// <summary>
 /// Types of documents that can be synced.
-/// Determines how the document is handled (wrapped vs direct) and which API endpoint to use.
+/// All files are pre-wrapped with entity structure (identifier, type, active, tags, indexes, data).
+/// Determines which RavenDB collection to use.
 /// </summary>
 public enum DocumentType
 {
     /// <summary>
-    /// Full Entity document stored in entities/ folder.
-    /// Synced directly without wrapping.
+    /// Entity document from entities/ folder.
+    /// Pre-wrapped, synced to entities collection.
     /// </summary>
     Entity,
 
     /// <summary>
-    /// Full Identity document stored in identities/ folder.
-    /// Synced directly without wrapping.
+    /// Identity document from identities/ folder.
+    /// Pre-wrapped, synced to identities collection.
     /// </summary>
     Identity,
 
     /// <summary>
-    /// Raw UI schema from sections/ folder.
-    /// Wrapped in an Entity with type "ui-schema-section" before syncing.
+    /// UI schema section from sections/ folder.
+    /// Pre-wrapped with type "ui-schema-section".
     /// </summary>
     Section,
 
     /// <summary>
-    /// Raw UI schema for layout (e.g., dirt-life-layout.json).
-    /// Wrapped in an Entity with type "ui-schema-layout" before syncing.
+    /// UI schema layout from layouts/ folder (e.g., dirt-life-layout.json).
+    /// Pre-wrapped with type "ui-schema-layout".
     /// </summary>
     Layout,
 
     /// <summary>
-    /// Raw UI schema for menu (e.g., dirt-life-menu.json).
-    /// Wrapped in an Entity with type "ui-schema-menu" before syncing.
+    /// UI schema menu from menus/ folder (e.g., dirt-life-menu.json).
+    /// Pre-wrapped with type "ui-schema-menu".
     /// </summary>
     Menu,
 
     /// <summary>
-    /// Modal configuration stored in modals/ folder.
-    /// Full Entity document with type "modal-config".
+    /// Modal configuration from modals/ folder.
+    /// Pre-wrapped with type "modal-config".
     /// </summary>
-    Modal
+    Modal,
+
+    /// <summary>
+    /// Layout manifest from manifests/ folder.
+    /// Pre-wrapped with type "layout-manifest".
+    /// </summary>
+    Manifest,
+
+    /// <summary>
+    /// Tag entity from tags/ folder.
+    /// Pre-wrapped with type "tag".
+    /// </summary>
+    Tag,
+
+    /// <summary>
+    /// Workflow definition from workflows/ folder (repo root).
+    /// Pre-wrapped with type "workflow-definition".
+    /// First-class app infrastructure - not layout-specific.
+    /// </summary>
+    Workflow
 }
 
 /// <summary>
@@ -49,23 +69,6 @@ public enum DocumentType
 public static class DocumentTypeExtensions
 {
     /// <summary>
-    /// Determines if the document type requires wrapping in an Entity.
-    /// </summary>
-    public static bool RequiresWrapping(this DocumentType type) =>
-        type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu;
-
-    /// <summary>
-    /// Gets the entity type string for documents that require wrapping.
-    /// </summary>
-    public static string? GetEntityType(this DocumentType type) => type switch
-    {
-        DocumentType.Section => "ui-schema-section",
-        DocumentType.Layout => "ui-schema-layout",
-        DocumentType.Menu => "ui-schema-menu",
-        _ => null
-    };
-
-    /// <summary>
     /// Gets the API endpoint route for this document type.
     /// </summary>
     public static string GetApiRoute(this DocumentType type) => type switch
@@ -73,4 +76,30 @@ public static class DocumentTypeExtensions
         DocumentType.Identity => "i",
         _ => "e" // Entity, Section, Layout, Menu, Modal all go to /api/e
     };
+
+    /// <summary>
+    /// Gets the RavenDB collection name for this document type.
+    /// Static layout/schema data goes to dedicated collections (safe for orphan cleanup).
+    /// User data stays in entities/identities (never auto-delete).
+    /// All collection names are lowercase.
+    /// </summary>
+    public static string GetCollection(this DocumentType type) => type switch
+    {
+        DocumentType.Section => "sections",
+        DocumentType.Layout => "layouts",
+        DocumentType.Menu => "menus",
+        DocumentType.Modal => "modals",
+        DocumentType.Manifest => "manifests",
+        DocumentType.Tag => "tags",
+        DocumentType.Workflow => "workflows",
+        DocumentType.Identity => "identities",
+        DocumentType.Entity => "entities",
+        _ => "entities"
+    };
+
+    /// <summary>
+    /// Returns true if the collection is safe for orphan cleanup (static data only).
+    /// </summary>
+    public static bool IsStaticCollection(this DocumentType type) =>
+        type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow;
 }

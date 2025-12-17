@@ -106,6 +106,9 @@ public enum SyncAction
     /// <summary>Document was deleted from database.</summary>
     Deleted,
 
+    /// <summary>Orphan document was deleted (not in local files).</summary>
+    OrphanDeleted,
+
     /// <summary>Only validated, no changes made (--validate-only mode).</summary>
     Validated,
 
@@ -142,6 +145,12 @@ public class SyncBatchResult
     /// <summary>Number of documents with human-readable IDs.</summary>
     public int HumanReadableIdCount => Results.Count(r => r.Document.HasHumanReadableId);
 
+    /// <summary>Number of orphan documents deleted.</summary>
+    public int OrphanDeletedCount => Results.Count(r => r.Action == SyncAction.OrphanDeleted);
+
     /// <summary>Total duration of the batch.</summary>
     public TimeSpan TotalDuration { get; set; }
+
+    /// <summary>Orphans detected per collection (identifier -> docId).</summary>
+    public Dictionary<string, Dictionary<string, string>> OrphansDetected { get; } = [];
 }

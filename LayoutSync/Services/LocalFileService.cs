@@ -47,16 +47,20 @@ public class LocalFileService(ILogger<LocalFileService> logger)
             string? layoutId = ExtractLayoutId(relativePath);
 
             // Extract id and identifier from content
-            string? id = content["id"]?.GetValue<string>();
+            // Check for top-level "id" first, then fall back to "@metadata.@id" (RavenDB format)
+            string? id = content["id"]?.GetValue<string>()
+                ?? content["@metadata"]?.AsObject()?["@id"]?.GetValue<string>();
             string? identifier = content["identifier"]?.GetValue<string>();
 
             // Check if ID is human-readable
             bool hasHumanReadableId = !string.IsNullOrEmpty(id) && NanoIdValidator.IsHumanReadable(id);
 
-            // For sections/layouts/menus, the content's "id" becomes the identifier
-            if (docType.RequiresWrapping() && string.IsNullOrEmpty(identifier))
+            // All JSON files should have wrapper structure with identifier field
+            // Fall back to filename if not present
+            if (string.IsNullOrEmpty(identifier))
             {
-                identifier = id; // The schema's id becomes the entity's identifier
+                identifier = Path.GetFileNameWithoutExtension(filePath);
+                _logger.LogDebug("Derived identifier '{Identifier}' from filename for {DocType}", identifier, docType);
             }
 
             SyncDocument doc = new()
@@ -64,7 +68,7 @@ public class LocalFileService(ILogger<LocalFileService> logger)
                 Id = id,
                 Identifier = identifier,
                 DocumentType = docType,
-                EntityType = content["type"]?.GetValue<string>() ?? docType.GetEntityType(),
+                EntityType = content["type"]?.GetValue<string>(),
                 LayoutId = layoutId,
                 FilePath = filePath,
                 RelativePath = relativePath,
@@ -127,16 +131,25 @@ public class LocalFileService(ILogger<LocalFileService> logger)
 
         foreach (string layoutDir in layoutDirs)
         {
-            string layoutId = Path.GetFileName(layoutDir);
+            // Layouts folder (collection-based structure)
+            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "layouts")))
+                yield return file;
 
-            // Layout and menu files at root
-            string layoutFile = Path.Combine(layoutDir, $"{layoutId}-layout.json");
-            if (File.Exists(layoutFile))
-                yield return layoutFile;
+            // Menus folder (collection-based structure)
+            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "menus")))
+                yield return file;
 
-            string menuFile = Path.Combine(layoutDir, $"{layoutId}-menu.json");
-            if (File.Exists(menuFile))
-                yield return menuFile;
+            // Manifests folder (collection-based structure)
+            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "manifests")))
+                yield return file;
+
+            // Sections folder
+            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "sections")))
+                yield return file;
+
+            // Modals folder
+            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "modals")))
+                yield return file;
 
             // Entities folder
             foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "entities")))
@@ -146,12 +159,12 @@ public class LocalFileService(ILogger<LocalFileService> logger)
             foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "identities")))
                 yield return file;
 
-            // Modals folder
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "modals")))
+            // Tags folder
+            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "tags")))
                 yield return file;
 
-            // Sections folder
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "sections")))
+            // Workflows folder
+            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "workflows")))
                 yield return file;
         }
     }
@@ -165,28 +178,27 @@ public class LocalFileService(ILogger<LocalFileService> logger)
 
     /// <summary>
     /// Determines the document type based on the file path.
+    /// Files are organized in collection-based folders: layouts/, menus/, manifests/, sections/, etc.
     /// </summary>
     public static DocumentType DetermineDocumentType(string relativePath)
     {
         string[] parts = relativePath.Split('/');
 
-        // Check for layout/menu files at root of layout folder
-        string fileName = parts[^1];
-        if (fileName.EndsWith("-layout.json"))
-            return DocumentType.Layout;
-        if (fileName.EndsWith("-menu.json"))
-            return DocumentType.Menu;
-
-        // Check folder-based types
+        // Check folder-based types (collection-based structure)
         if (parts.Length >= 2)
         {
             string folder = parts[1].ToLowerInvariant();
             return folder switch
             {
+                "layouts" => DocumentType.Layout,
+                "menus" => DocumentType.Menu,
+                "manifests" => DocumentType.Manifest,
+                "sections" => DocumentType.Section,
+                "modals" => DocumentType.Modal,
                 "entities" => DocumentType.Entity,
                 "identities" => DocumentType.Identity,
-                "modals" => DocumentType.Modal,
-                "sections" => DocumentType.Section,
+                "tags" => DocumentType.Tag,
+                "workflows" => DocumentType.Workflow,
                 _ => DocumentType.Entity // Default to entity
             };
         }

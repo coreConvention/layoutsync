@@ -1,10 +1,17 @@
+using System.Dynamic;
+using System.Text.Json;
 using System.Text.Json.Nodes;
+using coreConvention.Core.JsonConverters;
+using coreConvention.Core.Validation;
 using LayoutSync.Configuration;
 using LayoutSync.Models;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Serialization;
 using Raven.Client.Documents;
 using Raven.Client.Documents.Operations;
 using Raven.Client.Documents.Session;
+using Raven.Client.Json.Serialization.NewtonsoftJson;
 
 namespace LayoutSync.Services;
 
@@ -24,7 +31,32 @@ public class RavenDbService : IDisposable
     _logger = logger;
     _options = options;
 
-    _store = new DocumentStore { Urls = [options.Url], Database = options.Database };
+    _store = new DocumentStore
+    {
+      Urls = [options.Url],
+      Database = options.Database,
+      Conventions =
+      {
+        // CRITICAL: Prevent CLR type name storage in @metadata
+        // This stops RavenDB from adding Raven-Clr-Type metadata
+        FindClrTypeName = _ => null,
+        FindClrTypeNameForDynamic = _ => null,
+        // Disable CLR type metadata storage - we want clean JSON without $type properties
+        Serialization = new NewtonsoftJsonSerializationConventions
+        {
+          CustomizeJsonSerializer = serializer =>
+          {
+            serializer.ContractResolver = new CamelCasePropertyNamesContractResolver();
+            serializer.TypeNameHandling = TypeNameHandling.None;
+            serializer.PreserveReferencesHandling = PreserveReferencesHandling.None;
+            // CRITICAL: Custom ExpandoObject converter to prevent $type on List<object>
+            // TypeNameHandling.None doesn't prevent $type for polymorphic types like List<object>
+            // This converter explicitly writes clean JSON without type metadata
+            serializer.Converters.Add(new ExpandoObjectNewtonsoftConverter());
+          }
+        }
+      }
+    };
 
     _store.Initialize();
     _logger.LogDebug(
@@ -36,6 +68,7 @@ public class RavenDbService : IDisposable
 
   /// <summary>
   /// Looks up a document by identifier (for entities) or id (for identities).
+  /// For identities, uses direct document ID load since ID is in @metadata.@id, not a top-level field.
   /// </summary>
   public async Task<(string? DocumentId, JsonObject? Document)> FindDocumentAsync(
     SyncDocument doc,
@@ -44,23 +77,39 @@ public class RavenDbService : IDisposable
   {
     using IAsyncDocumentSession session = _store.OpenAsyncSession();
 
-    string collection = doc.DocumentType == DocumentType.Identity ? "Identities" : "Entities";
-    string lookupField = doc.DocumentType == DocumentType.Identity ? "Id" : "Identifier";
+    // Route to correct collection based on document type
+    string collection = doc.DocumentType.GetCollection();
     string lookupValue = doc.LookupKey;
 
     if (string.IsNullOrEmpty(lookupValue))
     {
-      _logger.LogWarning("Cannot lookup document without {Field}", lookupField);
+      _logger.LogWarning("Cannot lookup document without identifier/id");
       return (null, null);
     }
 
     try
     {
-      // Use RQL to query by identifier/id
-      string query =
-        doc.DocumentType == DocumentType.Identity
-          ? $"from {collection} where Id = $lookupValue"
-          : $"from {collection} where Identifier = $lookupValue";
+      // For identities, load directly by document ID (stored in @metadata.@id)
+      // since identities don't have a top-level "id" field in the document
+      if (doc.DocumentType == DocumentType.Identity)
+      {
+        object? loaded = await session.LoadAsync<object>(lookupValue, ct);
+        if (loaded == null)
+        {
+          _logger.LogDebug("Identity not found by id: {Id}", lookupValue);
+          return (null, null);
+        }
+
+        string? docId = session.Advanced.GetDocumentId(loaded);
+        string json = System.Text.Json.JsonSerializer.Serialize(loaded);
+        JsonObject? jsonObj = JsonNode.Parse(json)?.AsObject();
+
+        _logger.LogDebug("Found identity by id: {DocumentId}", docId);
+        return (docId, jsonObj);
+      }
+
+      // For entities, query by identifier field
+      string query = $"from {collection} where identifier = $lookupValue";
 
       IAsyncRawDocumentQuery<object> results = session
         .Advanced.AsyncRawQuery<object>(query)
@@ -71,29 +120,27 @@ public class RavenDbService : IDisposable
       if (documents.Count == 0)
       {
         _logger.LogDebug(
-          "Document not found: {LookupField}={LookupValue}",
-          lookupField,
+          "Document not found: identifier={LookupValue}",
           lookupValue
         );
         return (null, null);
       }
 
       object first = documents[0];
-      string? docId = session.Advanced.GetDocumentId(first);
+      string? entityDocId = session.Advanced.GetDocumentId(first);
 
       // Convert to JsonObject by serializing and re-parsing
-      string json = System.Text.Json.JsonSerializer.Serialize(first);
-      JsonObject? jsonObj = JsonNode.Parse(json)?.AsObject();
+      string entityJson = System.Text.Json.JsonSerializer.Serialize(first);
+      JsonObject? entityJsonObj = JsonNode.Parse(entityJson)?.AsObject();
 
-      _logger.LogDebug("Found document: {DocumentId}", docId);
-      return (docId, jsonObj);
+      _logger.LogDebug("Found document: {DocumentId} in {Collection}", entityDocId, collection);
+      return (entityDocId, entityJsonObj);
     }
     catch (Exception ex)
     {
       _logger.LogError(
         ex,
-        "Error looking up document: {LookupField}={LookupValue}",
-        lookupField,
+        "Error looking up document: {LookupValue}",
         lookupValue
       );
       return (null, null);
@@ -101,11 +148,25 @@ public class RavenDbService : IDisposable
   }
 
   /// <summary>
-  /// Creates a new document in RavenDB.
+  /// JsonSerializerOptions with ExpandoObjectConverter for proper deserialization.
   /// </summary>
+  private static readonly System.Text.Json.JsonSerializerOptions ExpandoSerializerOptions = new()
+  {
+    Converters = { new ExpandoObjectConverter() }
+  };
+
+  /// <summary>
+  /// Creates a new document in RavenDB using raw JSON (no CLR type metadata).
+  /// TypeNameHandling.None is configured in the DocumentStore constructor to prevent $type properties.
+  /// </summary>
+  /// <param name="doc">The sync document metadata.</param>
+  /// <param name="content">The document content to store.</param>
+  /// <param name="existingDocId">Optional: existing @id to preserve (for replace operations).</param>
+  /// <param name="ct">Cancellation token.</param>
   public async Task<string?> CreateDocumentAsync(
     SyncDocument doc,
     JsonObject content,
+    string? existingDocId = null,
     CancellationToken ct = default
   )
   {
@@ -113,27 +174,28 @@ public class RavenDbService : IDisposable
 
     try
     {
-      string collection = doc.DocumentType == DocumentType.Identity ? "Identities" : "Entities";
+      // Route to correct collection based on document type
+      string collection = doc.DocumentType.GetCollection();
 
-      // Store as dynamic object
+      // Convert JsonObject to ExpandoObject using custom converter for proper native types
       string json = content.ToJsonString();
-      dynamic entity = System.Text.Json.JsonSerializer.Deserialize<dynamic>(json)!;
+      ExpandoObject entity = System.Text.Json.JsonSerializer.Deserialize<ExpandoObject>(json, ExpandoSerializerOptions)
+        ?? new ExpandoObject();
 
-      // Use the document's ID if it has one
-      string? docId = doc.Id;
-      if (!string.IsNullOrEmpty(docId))
-      {
-        await session.StoreAsync(entity, $"{collection}/{docId}", ct);
-      }
-      else
-      {
-        await session.StoreAsync(entity, ct);
-        docId = session.Advanced.GetDocumentId(entity);
-      }
+      // Use existing @id if provided (for replacements), otherwise generate new NanoID
+      // Note: Just use NanoID without collection prefix - collection is set via @metadata
+      string docId = existingDocId ?? NanoIdValidator.GenerateNanoId();
+
+      // Store with explicit ID
+      await session.StoreAsync(entity, docId, ct);
+
+      // Explicitly set collection metadata (RavenDB determines collection from this)
+      IMetadataDictionary metadata = session.Advanced.GetMetadataFor(entity);
+      metadata["@collection"] = collection;
 
       await session.SaveChangesAsync(ct);
 
-      _logger.LogInformation("Created document: {DocumentId}", docId);
+      _logger.LogInformation("Created document: {DocumentId} in {Collection}", docId, collection);
       return docId;
     }
     catch (Exception ex)
@@ -145,6 +207,7 @@ public class RavenDbService : IDisposable
 
   /// <summary>
   /// Updates a document using JSON Patch operations.
+  /// The patch script iterates over args.data keys and updates the document.
   /// </summary>
   public async Task<bool> PatchDocumentAsync(
     string documentId,
@@ -154,8 +217,17 @@ public class RavenDbService : IDisposable
   {
     try
     {
-      // Use the RavenDB patch API
-      PatchRequest patchRequest = new() { Script = BuildPatchScript(patchOperations) };
+      // Convert JsonObject to ExpandoObject for RavenDB serialization
+      string json = patchOperations.ToJsonString();
+      ExpandoObject patchData = System.Text.Json.JsonSerializer.Deserialize<ExpandoObject>(json, ExpandoSerializerOptions)
+        ?? new ExpandoObject();
+
+      // Use the RavenDB patch API with Values to pass data to the script
+      PatchRequest patchRequest = new()
+      {
+        Script = BuildPatchScript(patchOperations),
+        Values = new Dictionary<string, object> { { "data", patchData } }
+      };
 
       PatchOperation operation = new(documentId, null, patchRequest);
       await _store.Operations.SendAsync(operation, token: ct);
@@ -167,6 +239,49 @@ public class RavenDbService : IDisposable
     {
       _logger.LogError(ex, "Error patching document: {DocumentId}", documentId);
       return false;
+    }
+  }
+
+  /// <summary>
+  /// Gets all identifiers from a specific collection.
+  /// Used for orphan detection in static collections.
+  /// </summary>
+  /// <param name="collection">The RavenDB collection name (e.g., "Sections").</param>
+  /// <param name="ct">Cancellation token.</param>
+  /// <returns>Dictionary mapping identifier to document ID.</returns>
+  public async Task<Dictionary<string, string>> GetAllIdentifiersAsync(
+    string collection,
+    CancellationToken ct = default
+  )
+  {
+    using IAsyncDocumentSession session = _store.OpenAsyncSession();
+    Dictionary<string, string> result = [];
+
+    try
+    {
+      // Query all documents in the collection, getting identifier and @id
+      string query = $"from {collection} select identifier, id()";
+      IAsyncRawDocumentQuery<dynamic> results = session.Advanced.AsyncRawQuery<dynamic>(query);
+      List<dynamic> documents = await results.ToListAsync(ct);
+
+      foreach (dynamic doc in documents)
+      {
+        string? identifier = doc.identifier?.ToString();
+        string? docId = doc["id()"]?.ToString();
+
+        if (!string.IsNullOrEmpty(identifier) && !string.IsNullOrEmpty(docId))
+        {
+          result[identifier] = docId;
+        }
+      }
+
+      _logger.LogDebug("Found {Count} documents in {Collection}", result.Count, collection);
+      return result;
+    }
+    catch (Exception ex)
+    {
+      _logger.LogError(ex, "Error querying identifiers from {Collection}", collection);
+      return result;
     }
   }
 
@@ -193,7 +308,7 @@ public class RavenDbService : IDisposable
   }
 
   /// <summary>
-  /// Replaces an entire document (delete + create with same IDs).
+  /// Replaces an entire document (delete + create with same @id).
   /// </summary>
   public async Task<string?> ReplaceDocumentAsync(
     string documentId,
@@ -207,8 +322,8 @@ public class RavenDbService : IDisposable
       // Delete old
       await DeleteDocumentAsync(documentId, ct);
 
-      // Create new with same identifier/id
-      return await CreateDocumentAsync(doc, newContent, ct);
+      // Create new with same @id to preserve references
+      return await CreateDocumentAsync(doc, newContent, existingDocId: documentId, ct: ct);
     }
     catch (Exception ex)
     {
