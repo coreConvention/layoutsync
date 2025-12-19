@@ -31,8 +31,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Reference shared validation library from API -->
+    <!-- Reference shared libraries from API -->
     <ProjectReference Include="..\..\..\api\coreConvention\coreConvention.Core\coreConvention.Core.csproj" />
+    <ProjectReference Include="..\..\..\api\coreConvention\coreConvention.Core.Serialization\coreConvention.Core.Serialization.csproj" />
   </ItemGroup>
 
   <ItemGroup>

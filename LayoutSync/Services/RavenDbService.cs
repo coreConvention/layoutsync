@@ -1,7 +1,8 @@
 using System.Dynamic;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using coreConvention.Core.JsonConverters;
+using coreConvention.Core.Serialization.Converters.Newtonsoft;
+using coreConvention.Core.Serialization.Converters.SystemTextJson;
 using coreConvention.Core.Validation;
 using LayoutSync.Configuration;
 using LayoutSync.Models;
@@ -152,7 +153,7 @@ public class RavenDbService : IDisposable
   /// </summary>
   private static readonly System.Text.Json.JsonSerializerOptions ExpandoSerializerOptions = new()
   {
-    Converters = { new ExpandoObjectConverter() }
+    Converters = { new ExpandoObjectSystemTextJsonConverter() }
   };
 
   /// <summary>
