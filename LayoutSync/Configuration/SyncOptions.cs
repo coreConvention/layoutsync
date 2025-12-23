@@ -42,4 +42,16 @@ public class RavenDbOptions
     /// Name of the database to sync documents to.
     /// </summary>
     public string Database { get; set; } = "coreConvention";
+
+    /// <summary>
+    /// Path to .pfx certificate file for RavenDB Cloud authentication.
+    /// Required when connecting to RavenDB Cloud.
+    /// </summary>
+    public string? CertificatePath { get; set; }
+
+    /// <summary>
+    /// Password for the .pfx certificate file.
+    /// Use null or empty string for certificates without password.
+    /// </summary>
+    public string? CertificatePassword { get; set; }
 }

@@ -34,6 +34,16 @@ public class Program
             description: "Database name")
         { IsRequired = false };
 
+        Option<string> certPathOption = new(
+            aliases: ["--cert", "-c"],
+            description: "Path to .pfx certificate for RavenDB Cloud authentication")
+        { IsRequired = false };
+
+        Option<string> certPasswordOption = new(
+            aliases: ["--cert-password"],
+            description: "Password for the .pfx certificate (if password-protected)")
+        { IsRequired = false };
+
         Option<string> layoutOption = new(
             aliases: ["--layout", "-l"],
             description: "Specific layout to watch (default: all)")
@@ -80,6 +90,8 @@ public class Program
             layoutsPathOption,
             ravenUrlOption,
             databaseOption,
+            certPathOption,
+            certPasswordOption,
             layoutOption,
             syncOnceOption,
             validateOnlyOption,
@@ -98,6 +110,8 @@ public class Program
                     LayoutsPath = context.ParseResult.GetValueForOption(layoutsPathOption),
                     RavenUrl = context.ParseResult.GetValueForOption(ravenUrlOption),
                     Database = context.ParseResult.GetValueForOption(databaseOption),
+                    CertificatePath = context.ParseResult.GetValueForOption(certPathOption),
+                    CertificatePassword = context.ParseResult.GetValueForOption(certPasswordOption),
                     Layout = context.ParseResult.GetValueForOption(layoutOption),
                     SyncOnce = context.ParseResult.GetValueForOption(syncOnceOption),
                     ValidateOnly = context.ParseResult.GetValueForOption(validateOnlyOption),
@@ -151,6 +165,10 @@ public class Program
                         ravenOptions.Url = args.RavenUrl;
                     if (!string.IsNullOrEmpty(args.Database))
                         ravenOptions.Database = args.Database;
+                    if (!string.IsNullOrEmpty(args.CertificatePath))
+                        ravenOptions.CertificatePath = args.CertificatePath;
+                    if (!string.IsNullOrEmpty(args.CertificatePassword))
+                        ravenOptions.CertificatePassword = args.CertificatePassword;
 
                     services.AddSingleton(syncOptions);
                     services.AddSingleton(ravenOptions);
@@ -247,6 +265,8 @@ public class CommandLineArgs
     public string? LayoutsPath { get; init; }
     public string? RavenUrl { get; init; }
     public string? Database { get; init; }
+    public string? CertificatePath { get; init; }
+    public string? CertificatePassword { get; init; }
     public string? Layout { get; init; }
     public bool SyncOnce { get; init; }
     public bool ValidateOnly { get; init; }

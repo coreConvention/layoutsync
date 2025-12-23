@@ -1,4 +1,5 @@
 using System.Dynamic;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using coreConvention.Core.Serialization.Converters.Newtonsoft;
@@ -32,10 +33,27 @@ public class RavenDbService : IDisposable
     _logger = logger;
     _options = options;
 
+    // Load certificate if path is provided (required for RavenDB Cloud)
+    X509Certificate2? certificate = null;
+    if (!string.IsNullOrEmpty(options.CertificatePath))
+    {
+      if (!File.Exists(options.CertificatePath))
+      {
+        throw new FileNotFoundException($"Certificate file not found: {options.CertificatePath}");
+      }
+
+      certificate = string.IsNullOrEmpty(options.CertificatePassword)
+        ? new X509Certificate2(options.CertificatePath)
+        : new X509Certificate2(options.CertificatePath, options.CertificatePassword);
+
+      _logger.LogInformation("Loaded certificate: {Subject}", certificate.Subject);
+    }
+
     _store = new DocumentStore
     {
       Urls = [options.Url],
       Database = options.Database,
+      Certificate = certificate,
       Conventions =
       {
         // CRITICAL: Prevent CLR type name storage in @metadata
