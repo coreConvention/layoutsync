@@ -116,6 +116,21 @@ public class DocumentSyncService(
 
         // All JSON files should already have wrapper structure
         JsonObject contentToSync = doc.Content ?? new JsonObject();
+
+        // Inject layoutId for entity documents — entities must be scoped to a layout.
+        // The layoutId is derived from the layout directory name (e.g., "layouts/dirt-life/" → "dirt-life").
+        // We always overwrite layoutId in the content to ensure consistency with the directory name.
+        // System collections (sections, layouts, menus, modals, manifests, tags, workflows) are EXEMPT.
+        if (doc.DocumentType == DocumentType.Entity && !string.IsNullOrEmpty(doc.LayoutId))
+        {
+            contentToSync["layoutId"] = doc.LayoutId;
+            _logger.LogDebug(
+                "Injecting layoutId='{LayoutId}' for entity: {Identifier}",
+                doc.LayoutId,
+                doc.Identifier
+            );
+        }
+
         doc.WrappedContent = contentToSync;
 
         // Look up in database
