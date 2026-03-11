@@ -60,7 +60,13 @@ public enum DocumentType
     /// Pre-wrapped with type "workflow-definition".
     /// First-class app infrastructure - not layout-specific.
     /// </summary>
-    Workflow
+    Workflow,
+
+    /// <summary>
+    /// Write policy definition from write-policies/ folder.
+    /// Pre-wrapped with type "write-policy".
+    /// </summary>
+    WritePolicy,
 }
 
 /// <summary>
@@ -74,6 +80,7 @@ public static class DocumentTypeExtensions
     public static string GetApiRoute(this DocumentType type) => type switch
     {
         DocumentType.Identity => "i",
+        DocumentType.WritePolicy => "e", // Write policies use entity API route
         _ => "e" // Entity, Section, Layout, Menu, Modal all go to /api/e
     };
 
@@ -92,6 +99,7 @@ public static class DocumentTypeExtensions
         DocumentType.Manifest => "manifests",
         DocumentType.Tag => "tags",
         DocumentType.Workflow => "workflows",
+        DocumentType.WritePolicy => "WritePolicies",
         DocumentType.Identity => "identities",
         DocumentType.Entity => "entities",
         _ => "entities"
@@ -101,5 +109,5 @@ public static class DocumentTypeExtensions
     /// Returns true if the collection is safe for orphan cleanup (static data only).
     /// </summary>
     public static bool IsStaticCollection(this DocumentType type) =>
-        type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow;
+        type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow or DocumentType.WritePolicy;
 }

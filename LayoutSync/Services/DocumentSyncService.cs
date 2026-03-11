@@ -53,7 +53,8 @@ public class DocumentSyncService(
             ["modals"] = [],
             ["manifests"] = [],
             ["tags"] = [],
-            ["workflows"] = []
+            ["workflows"] = [],
+            ["WritePolicies"] = []
         };
 
         IEnumerable<string> files = _fileService.DiscoverFiles(layoutsPath, layout);
@@ -121,7 +122,7 @@ public class DocumentSyncService(
         // The layoutId is derived from the layout directory name (e.g., "layouts/dirt-life/" → "dirt-life").
         // We always overwrite layoutId in the content to ensure consistency with the directory name.
         // System collections (sections, layouts, menus, modals, manifests, tags, workflows) are EXEMPT.
-        if (doc.DocumentType == DocumentType.Entity && !string.IsNullOrEmpty(doc.LayoutId))
+        if ((doc.DocumentType == DocumentType.Entity || doc.DocumentType == DocumentType.WritePolicy) && !string.IsNullOrEmpty(doc.LayoutId))
         {
             contentToSync["layoutId"] = doc.LayoutId;
             _logger.LogDebug(
@@ -264,6 +265,7 @@ public class DocumentSyncService(
         "manifests" => DocumentType.Manifest,
         "tags" => DocumentType.Tag,
         "workflows" => DocumentType.Workflow,
+        "WritePolicies" => DocumentType.WritePolicy,
         _ => DocumentType.Entity
     };
 
@@ -448,6 +450,7 @@ public class DocumentSyncService(
         int manifests = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Manifest);
         int tags = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Tag);
         int workflows = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Workflow);
+        int writePolicies = batch.Results.Count(r => r.Document.DocumentType == DocumentType.WritePolicy);
         int entities = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Entity);
         int identities = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Identity);
 
@@ -460,6 +463,7 @@ public class DocumentSyncService(
         if (manifests > 0) parts.Add($"{manifests} manifests");
         if (tags > 0) parts.Add($"{tags} tags");
         if (workflows > 0) parts.Add($"{workflows} workflows");
+        if (writePolicies > 0) parts.Add($"{writePolicies} write policies");
         if (entities > 0) parts.Add($"{entities} entities");
         if (identities > 0) parts.Add($"{identities} identities");
 

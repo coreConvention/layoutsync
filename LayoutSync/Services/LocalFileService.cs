@@ -166,6 +166,10 @@ public class LocalFileService(ILogger<LocalFileService> logger)
             // Workflows folder
             foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "workflows")))
                 yield return file;
+
+            // Write policies folder
+            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "write-policies")))
+                yield return file;
         }
     }
 
@@ -199,6 +203,7 @@ public class LocalFileService(ILogger<LocalFileService> logger)
                 "identities" => DocumentType.Identity,
                 "tags" => DocumentType.Tag,
                 "workflows" => DocumentType.Workflow,
+                "write-policies" => DocumentType.WritePolicy,
                 _ => DocumentType.Entity // Default to entity
             };
         }
