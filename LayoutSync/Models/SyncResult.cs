@@ -76,13 +76,14 @@ public class SyncResult
     /// <summary>
     /// Creates a skipped sync result.
     /// </summary>
-    public static SyncResult Skipped(SyncDocument document, string reason) =>
+    public static SyncResult Skipped(SyncDocument document, string reason, string? ravenDocId = null) =>
         new()
         {
             Document = document,
             Action = SyncAction.Skipped,
             Success = true,
-            ErrorMessage = reason
+            ErrorMessage = reason,
+            RavenDocumentId = ravenDocId
         };
 }
 

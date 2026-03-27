@@ -231,9 +231,14 @@ public class Program
             {
                 // Watch mode
                 Log.Information("Initial sync...");
-                await syncService.SyncAllAsync(layoutsPath, args.Layout, args.DryRun, args.Clean);
+                if (args.Clean)
+                    Log.Information("Clean mode - orphaned documents will be deleted from static collections");
+
+                LayoutSync.Models.SyncBatchResult initialResult = await syncService.SyncAllAsync(
+                    layoutsPath, args.Layout, args.DryRun, args.Clean);
 
                 Log.Information("Watching for changes... (Ctrl+C to stop)");
+                Log.Information("File deletions will be synced to RavenDB");
 
                 FileWatcherService watcher = host.Services.GetRequiredService<FileWatcherService>();
                 using CancellationTokenSource cts = new();
@@ -243,7 +248,7 @@ public class Program
                     cts.Cancel();
                 };
 
-                await watcher.WatchAsync(layoutsPath, args.Layout, args.DryRun, cts.Token);
+                await watcher.WatchAsync(layoutsPath, args.Layout, args.DryRun, initialResult, cts.Token);
             }
         }
         catch (Exception ex)

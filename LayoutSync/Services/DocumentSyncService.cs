@@ -169,7 +169,7 @@ public class DocumentSyncService(
                 if (ContentEquals(existingDoc, contentToSync))
                 {
                     _logger.LogDebug("No changes: {Identifier}", doc.Identifier);
-                    return SyncResult.Skipped(doc, "No changes detected");
+                    return SyncResult.Skipped(doc, "No changes detected", ravenDocId: existingDocId);
                 }
 
                 // ALWAYS use replace (delete + create) instead of patch
@@ -186,6 +186,60 @@ public class DocumentSyncService(
             sw.Stop();
             _logger.LogError(ex, "Sync failed: {Path}", doc.RelativePath);
             return SyncResult.Failed(doc, existingDocId == null ? SyncAction.Created : SyncAction.Patched, ex.Message, ex, sw.Elapsed);
+        }
+    }
+
+    /// <summary>
+    /// Deletes a document from RavenDB by its tracked identifier and type.
+    /// If ravenDocumentId is provided, deletes directly. Otherwise, queries by identifier.
+    /// </summary>
+    public async Task<SyncResult> DeleteTrackedDocumentAsync(
+        string identifier,
+        DocumentType documentType,
+        string? ravenDocumentId = null,
+        bool dryRun = false,
+        CancellationToken ct = default)
+    {
+        SyncDocument doc = new()
+        {
+            Identifier = identifier,
+            DocumentType = documentType
+        };
+
+        if (dryRun)
+        {
+            _logger.LogInformation("Would DELETE: {Identifier} ({Type})", identifier, documentType);
+            return SyncResult.Skipped(doc, "Dry run: Would DELETE");
+        }
+
+        try
+        {
+            // If we don't have the RavenDB document ID, look it up
+            if (string.IsNullOrEmpty(ravenDocumentId))
+            {
+                (string? foundDocId, _) = await _ravenService.FindDocumentAsync(doc, ct);
+                ravenDocumentId = foundDocId;
+            }
+
+            if (string.IsNullOrEmpty(ravenDocumentId))
+            {
+                _logger.LogDebug("Document not found in RavenDB for deletion: {Identifier}", identifier);
+                return SyncResult.Skipped(doc, "Not found in database");
+            }
+
+            bool deleted = await _ravenService.DeleteDocumentAsync(ravenDocumentId, ct);
+            if (deleted)
+            {
+                _logger.LogInformation("Deleted: {Identifier} ({DocId})", identifier, ravenDocumentId);
+                return SyncResult.Succeeded(doc, SyncAction.Deleted, ravenDocumentId);
+            }
+
+            return SyncResult.Failed(doc, SyncAction.Deleted, "Delete operation returned false");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deleting document: {Identifier}", identifier);
+            return SyncResult.Failed(doc, SyncAction.Deleted, ex.Message, ex);
         }
     }
 
