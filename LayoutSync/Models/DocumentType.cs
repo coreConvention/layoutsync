@@ -67,6 +67,13 @@ public enum DocumentType
     /// Pre-wrapped with type "write-policy".
     /// </summary>
     WritePolicy,
+
+    /// <summary>
+    /// Entity config definition from entity-configs/ folder.
+    /// Pre-wrapped with type "entity-config".
+    /// Layout-scoped — layoutId is injected automatically.
+    /// </summary>
+    EntityConfig,
 }
 
 /// <summary>
@@ -100,6 +107,7 @@ public static class DocumentTypeExtensions
         DocumentType.Tag => "tags",
         DocumentType.Workflow => "workflows",
         DocumentType.WritePolicy => "WritePolicies",
+        DocumentType.EntityConfig => "entity-configs",
         DocumentType.Identity => "identities",
         DocumentType.Entity => "entities",
         _ => "entities"
@@ -109,5 +117,5 @@ public static class DocumentTypeExtensions
     /// Returns true if the collection is safe for orphan cleanup (static data only).
     /// </summary>
     public static bool IsStaticCollection(this DocumentType type) =>
-        type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow or DocumentType.WritePolicy;
+        type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow or DocumentType.WritePolicy or DocumentType.EntityConfig;
 }
