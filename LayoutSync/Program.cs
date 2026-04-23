@@ -147,6 +147,18 @@ public class Program
         {
             Log.Information("Layout Sync Tool v1.0");
 
+            // Guard: --clean cannot be combined with --layout.
+            // Orphan detection queries each static collection globally without a layoutId
+            // filter, so combining a scoped sync with cleanup flags all non-scoped docs
+            // as orphans and deletes them. Refuse the combination to prevent destructive
+            // cross-layout deletions. See issue #235.
+            if (args.Clean && !string.IsNullOrEmpty(args.Layout))
+            {
+                Log.Error("--clean cannot be combined with --layout. Clean only runs unscoped.");
+                Log.Error("Either sync all layouts with --clean, or sync a single layout without --clean.");
+                return;
+            }
+
             // Build host
             IHost host = Host.CreateDefaultBuilder()
                 .UseSerilog()
