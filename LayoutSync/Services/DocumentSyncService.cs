@@ -54,7 +54,8 @@ public class DocumentSyncService(
             ["manifests"] = [],
             ["tags"] = [],
             ["workflows"] = [],
-            ["WritePolicies"] = []
+            ["WritePolicies"] = [],
+            ["entity-configs"] = []
         };
 
         IEnumerable<string> files = _fileService.DiscoverFiles(layoutsPath, layout);
