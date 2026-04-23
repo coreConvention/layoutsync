@@ -105,7 +105,7 @@ public class Program
         rootCommand.SetHandler(
             async (context) =>
             {
-                await RunAsync(new CommandLineArgs
+                context.ExitCode = await RunAsync(new CommandLineArgs
                 {
                     LayoutsPath = context.ParseResult.GetValueForOption(layoutsPathOption),
                     RavenUrl = context.ParseResult.GetValueForOption(ravenUrlOption),
@@ -126,7 +126,7 @@ public class Program
         return await rootCommand.InvokeAsync(args);
     }
 
-    private static async Task RunAsync(CommandLineArgs args)
+    private static async Task<int> RunAsync(CommandLineArgs args)
     {
         // Build configuration
         IConfigurationRoot configuration = new ConfigurationBuilder()
@@ -156,7 +156,7 @@ public class Program
             {
                 Log.Error("--clean cannot be combined with --layout. Clean only runs unscoped.");
                 Log.Error("Either sync all layouts with --clean, or sync a single layout without --clean.");
-                return;
+                return 1;
             }
 
             // Build host
@@ -202,7 +202,7 @@ public class Program
             if (string.IsNullOrEmpty(options.LayoutsPath))
             {
                 Log.Error("Layouts path is required. Use --layouts-path or set SyncOptions:LayoutsPath in config.");
-                return;
+                return 1;
             }
 
             // Resolve layouts path (supports relative or absolute)
@@ -213,7 +213,7 @@ public class Program
             if (!Directory.Exists(layoutsPath))
             {
                 Log.Error("Layouts directory not found: {Path}", layoutsPath);
-                return;
+                return 1;
             }
 
             Log.Information("Layouts: {Path}", layoutsPath);
@@ -262,10 +262,13 @@ public class Program
 
                 await watcher.WatchAsync(layoutsPath, args.Layout, args.DryRun, initialResult, cts.Token);
             }
+
+            return 0;
         }
         catch (Exception ex)
         {
             Log.Fatal(ex, "Application terminated unexpectedly");
+            return 1;
         }
         finally
         {
