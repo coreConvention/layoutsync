@@ -16,12 +16,14 @@ public class DocumentSyncService(
     ILogger<DocumentSyncService> logger,
     LocalFileService fileService,
     RavenDbService ravenService,
+    RelativeDateResolver relativeDateResolver,
     SyncOptions options,
     CommandLineArgs cliArgs)
 {
     private readonly ILogger<DocumentSyncService> _logger = logger;
     private readonly LocalFileService _fileService = fileService;
     private readonly RavenDbService _ravenService = ravenService;
+    private readonly RelativeDateResolver _relativeDateResolver = relativeDateResolver;
     private readonly SyncOptions _options = options;
     private readonly CommandLineArgs _cliArgs = cliArgs;
 
@@ -132,6 +134,14 @@ public class DocumentSyncService(
                 doc.Identifier
             );
         }
+
+        // Resolve relative-date expressions (e.g. "+3d", "+2w") in recognized date fields.
+        // This anchors "upcoming event" seeds to real future timestamps at sync time, ensuring
+        // seed data doesn't silently go stale as calendar time advances. Only fields that match
+        // the relative-date syntax are modified; ISO strings already present are left unchanged.
+        // All dates in a document are resolved against the same reference instant for consistency.
+        DateTime syncInstant = DateTime.UtcNow;
+        _relativeDateResolver.ResolveInDocument(contentToSync, syncInstant);
 
         doc.WrappedContent = contentToSync;
 

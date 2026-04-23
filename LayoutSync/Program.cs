@@ -189,6 +189,7 @@ public class Program
                     // Register services
                     services.AddSingleton<RavenDbService>();
                     services.AddSingleton<LocalFileService>();
+                    services.AddSingleton<RelativeDateResolver>();
                     services.AddSingleton<DocumentSyncService>();
                     services.AddSingleton<FileWatcherService>();
                 })
