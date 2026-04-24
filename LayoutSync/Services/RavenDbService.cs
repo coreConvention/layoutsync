@@ -28,6 +28,13 @@ public class RavenDbService : IDisposable
   private readonly IDocumentStore _store;
   private bool _disposed;
 
+  /// <summary>
+  /// Number of entity identifiers that resolved to more than one document during this
+  /// service's lifetime. Used by --strict mode to fail the sync when duplicates are present.
+  /// Detection only — duplicate entities are never auto-deleted (user-data protection).
+  /// </summary>
+  public int DuplicateEntityIdentifierCount { get; private set; }
+
   public RavenDbService(ILogger<RavenDbService> logger, RavenDbOptions options)
   {
     _logger = logger;
@@ -127,7 +134,11 @@ public class RavenDbService : IDisposable
         return (docId, jsonObj);
       }
 
-      // For entities, query by identifier field
+      // For entities, query by identifier field.
+      // NOTE: Historical seed uploads have been known to leave multiple entity documents
+      // with the same Identifier in the DB (see issue #282). Entity orphan cleanup is
+      // intentionally disabled to protect user data, so we CANNOT auto-delete extras —
+      // but we must at least detect and warn so these ghosts do not persist silently.
       string query = $"from {collection} where identifier = $lookupValue";
 
       IAsyncRawDocumentQuery<object> results = session
@@ -145,15 +156,32 @@ public class RavenDbService : IDisposable
         return (null, null);
       }
 
-      object first = documents[0];
-      string? entityDocId = session.Advanced.GetDocumentId(first);
+      // Map to (docId, JsonObject) tuples so the duplicate-detection helper can stay pure.
+      List<(string DocId, JsonObject? Json)> mapped = [];
+      foreach (object item in documents)
+      {
+        string? itemDocId = session.Advanced.GetDocumentId(item);
+        string itemJson = System.Text.Json.JsonSerializer.Serialize(item);
+        JsonObject? itemJsonObj = JsonNode.Parse(itemJson)?.AsObject();
+        if (!string.IsNullOrEmpty(itemDocId))
+        {
+          mapped.Add((itemDocId, itemJsonObj));
+        }
+      }
 
-      // Convert to JsonObject by serializing and re-parsing
-      string entityJson = System.Text.Json.JsonSerializer.Serialize(first);
-      JsonObject? entityJsonObj = JsonNode.Parse(entityJson)?.AsObject();
+      DuplicateEntityLookupResult resolved = ResolveEntityLookup(
+        collection,
+        lookupValue,
+        mapped,
+        _logger
+      );
 
-      _logger.LogDebug("Found document: {DocumentId} in {Collection}", entityDocId, collection);
-      return (entityDocId, entityJsonObj);
+      if (resolved.IsDuplicate)
+      {
+        DuplicateEntityIdentifierCount++;
+      }
+
+      return (resolved.DocumentId, resolved.Document);
     }
     catch (Exception ex)
     {
@@ -164,6 +192,73 @@ public class RavenDbService : IDisposable
       );
       return (null, null);
     }
+  }
+
+  /// <summary>
+  /// Result of <see cref="ResolveEntityLookup"/>: the first document (used as today) plus
+  /// a flag indicating whether multiple documents shared the same Identifier.
+  /// </summary>
+  public record DuplicateEntityLookupResult(
+    string? DocumentId,
+    JsonObject? Document,
+    bool IsDuplicate
+  );
+
+  /// <summary>
+  /// Pure helper: inspects a list of entity documents returned for a single Identifier
+  /// and — when more than one match is present — emits a <c>LogWarning</c> line per
+  /// duplicate document id so operators can purge them manually. Always returns the
+  /// first match so sync behavior is unchanged for single-match documents.
+  /// </summary>
+  /// <remarks>
+  /// Detection is report-only by design. Entity orphan deletion is intentionally disabled
+  /// in LayoutSync (user-data protection); auto-deleting entity duplicates would violate
+  /// that contract. Callers can opt into hard-failing via <c>--strict</c>, which consults
+  /// <see cref="DuplicateEntityIdentifierCount"/> at shutdown.
+  /// </remarks>
+  public static DuplicateEntityLookupResult ResolveEntityLookup(
+    string collection,
+    string lookupValue,
+    IReadOnlyList<(string DocId, JsonObject? Json)> documents,
+    ILogger logger
+  )
+  {
+    if (documents.Count == 0)
+    {
+      return new DuplicateEntityLookupResult(null, null, IsDuplicate: false);
+    }
+
+    (string firstDocId, JsonObject? firstJson) = documents[0];
+
+    if (documents.Count == 1)
+    {
+      logger.LogDebug(
+        "Found document: {DocumentId} in {Collection}",
+        firstDocId,
+        collection
+      );
+      return new DuplicateEntityLookupResult(firstDocId, firstJson, IsDuplicate: false);
+    }
+
+    // More than one match — WARN per doc id so the audit trail survives log aggregation.
+    logger.LogWarning(
+      "Duplicate entity identifier detected: '{Identifier}' in {Collection} ({Count} documents). Sync will update the first match; the rest persist as ghosts. Manual cleanup required (LayoutSync does not auto-delete entities).",
+      lookupValue,
+      collection,
+      documents.Count
+    );
+
+    foreach ((string docId, JsonObject? _) in documents)
+    {
+      logger.LogWarning(
+        "  duplicate: collection={Collection} identifier={Identifier} documentId={DocumentId}",
+        collection,
+        lookupValue,
+        docId
+      );
+    }
+
+    return new DuplicateEntityLookupResult(firstDocId, firstJson, IsDuplicate: true);
   }
 
   /// <summary>

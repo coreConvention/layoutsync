@@ -84,6 +84,11 @@ public class Program
             description: "Preserve IDs from local files when creating documents (uses @metadata.@id for identities)")
         { IsRequired = false };
 
+        Option<bool> strictOption = new(
+            aliases: ["--strict"],
+            description: "Exit non-zero if duplicate entity identifiers are detected during sync. Detection only — entity duplicates are never auto-deleted. Intended for CI.")
+        { IsRequired = false };
+
         // Create root command
         RootCommand rootCommand = new("Layout Sync Tool - Syncs layouts/ to RavenDB with NanoID enforcement")
         {
@@ -99,7 +104,8 @@ public class Program
             dryRunOption,
             cleanOption,
             verboseOption,
-            preserveIdsOption
+            preserveIdsOption,
+            strictOption
         };
 
         rootCommand.SetHandler(
@@ -119,7 +125,8 @@ public class Program
                     DryRun = context.ParseResult.GetValueForOption(dryRunOption),
                     Clean = context.ParseResult.GetValueForOption(cleanOption),
                     Verbose = context.ParseResult.GetValueForOption(verboseOption),
-                    PreserveIds = context.ParseResult.GetValueForOption(preserveIdsOption)
+                    PreserveIds = context.ParseResult.GetValueForOption(preserveIdsOption),
+                    Strict = context.ParseResult.GetValueForOption(strictOption)
                 });
             });
 
@@ -264,6 +271,20 @@ public class Program
                 await watcher.WatchAsync(layoutsPath, args.Layout, args.DryRun, initialResult, cts.Token);
             }
 
+            // --strict: fail the run if duplicate entity identifiers were detected during sync.
+            // Detection-only: duplicates were logged (not deleted) by RavenDbService.
+            // Applies to every mode — sync-once, watch, validate-only, fix-ids — because any
+            // path that hits FindDocumentAsync accumulates DuplicateEntityIdentifierCount.
+            RavenDbService ravenService = host.Services.GetRequiredService<RavenDbService>();
+            if (args.Strict && ravenService.DuplicateEntityIdentifierCount > 0)
+            {
+                Log.Error(
+                    "--strict: {Count} duplicate entity identifier(s) detected during sync. See WARN lines above for document IDs. LayoutSync does not auto-delete entity duplicates; purge manually via RavenDB.",
+                    ravenService.DuplicateEntityIdentifierCount
+                );
+                return 2;
+            }
+
             return 0;
         }
         catch (Exception ex)
@@ -296,4 +317,5 @@ public class CommandLineArgs
     public bool Clean { get; init; }
     public bool Verbose { get; init; }
     public bool PreserveIds { get; init; }
+    public bool Strict { get; init; }
 }
