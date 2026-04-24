@@ -197,6 +197,7 @@ public class Program
                     services.AddSingleton<RavenDbService>();
                     services.AddSingleton<LocalFileService>();
                     services.AddSingleton<RelativeDateResolver>();
+                    services.AddSingleton<SeedAuthorshipValidator>();
                     services.AddSingleton<DocumentSyncService>();
                     services.AddSingleton<FileWatcherService>();
                 })

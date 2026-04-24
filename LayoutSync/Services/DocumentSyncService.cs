@@ -17,6 +17,7 @@ public class DocumentSyncService(
     LocalFileService fileService,
     RavenDbService ravenService,
     RelativeDateResolver relativeDateResolver,
+    SeedAuthorshipValidator seedAuthorshipValidator,
     SyncOptions options,
     CommandLineArgs cliArgs)
 {
@@ -24,6 +25,7 @@ public class DocumentSyncService(
     private readonly LocalFileService _fileService = fileService;
     private readonly RavenDbService _ravenService = ravenService;
     private readonly RelativeDateResolver _relativeDateResolver = relativeDateResolver;
+    private readonly SeedAuthorshipValidator _seedAuthorshipValidator = seedAuthorshipValidator;
     private readonly SyncOptions _options = options;
     private readonly CommandLineArgs _cliArgs = cliArgs;
 
@@ -120,6 +122,10 @@ public class DocumentSyncService(
 
         // All JSON files should already have wrapper structure
         JsonObject contentToSync = doc.Content ?? new JsonObject();
+
+        // Non-blocking policy nudge: flag raw NanoIDs in identity-bearing fields on entity seeds
+        // so authors migrate to stable `ext:{provider}:{externalId}` refs. See issue #308.
+        _seedAuthorshipValidator.Validate(doc.DocumentType, doc.RelativePath, contentToSync);
 
         // Inject layoutId for entity documents — entities must be scoped to a layout.
         // The layoutId is derived from the layout directory name (e.g., "layouts/dirt-life/" → "dirt-life").
