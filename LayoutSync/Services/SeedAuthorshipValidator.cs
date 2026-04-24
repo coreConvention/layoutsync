@@ -29,6 +29,16 @@ public partial class SeedAuthorshipValidator(ILogger<SeedAuthorshipValidator> lo
     private readonly ILogger<SeedAuthorshipValidator> _logger = logger;
 
     /// <summary>
+    /// Number of seed files that emitted at least one raw-NanoID authorship warning during
+    /// this service's lifetime. Consumed by <c>--strict</c> mode to fail the sync when any
+    /// authorship drift is present.
+    ///
+    /// One offense per file (not per field) so a file with six offending fields counts as
+    /// a single authorship offense — matches the operator-facing WARN-per-file log shape.
+    /// </summary>
+    public int AuthorshipWarningCount { get; private set; }
+
+    /// <summary>
     /// NanoID-looking value detector. Generous length bounds (18-28) accommodate historical
     /// NanoIDs that pre-date the current 21-char standard. Pure `[A-Za-z0-9_-]` with no `:`
     /// separator — anything containing `:` is assumed to be a tagged ref (`ext:provider:id`)
@@ -116,6 +126,8 @@ public partial class SeedAuthorshipValidator(ILogger<SeedAuthorshipValidator> lo
 
         if (offendingPaths.Count == 0)
             return;
+
+        AuthorshipWarningCount++;
 
         _logger.LogWarning(
             "Seed file uses raw NanoID for identity references — consider migrating to `ext:{{provider}}:{{externalId}}`.\n"

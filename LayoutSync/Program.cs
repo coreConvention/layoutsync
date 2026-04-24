@@ -86,7 +86,12 @@ public class Program
 
         Option<bool> strictOption = new(
             aliases: ["--strict"],
-            description: "Exit non-zero if duplicate entity identifiers are detected during sync. Detection only — entity duplicates are never auto-deleted. Intended for CI.")
+            description: "Exit non-zero (code 2) if any validator emits an offense during sync (duplicate entity identifiers, raw-NanoID authorship warnings). Detection only — nothing is auto-deleted. Intended for CI.")
+        { IsRequired = false };
+
+        Option<bool> allowRemoteSyncOption = new(
+            aliases: ["--allow-remote-sync"],
+            description: "Explicit opt-in to sync against a non-localhost RavenDB target. Without this flag, LayoutSync refuses to write to Remote or Unknown targets and exits with code 3.")
         { IsRequired = false };
 
         // Create root command
@@ -105,7 +110,8 @@ public class Program
             cleanOption,
             verboseOption,
             preserveIdsOption,
-            strictOption
+            strictOption,
+            allowRemoteSyncOption
         };
 
         rootCommand.SetHandler(
@@ -126,7 +132,8 @@ public class Program
                     Clean = context.ParseResult.GetValueForOption(cleanOption),
                     Verbose = context.ParseResult.GetValueForOption(verboseOption),
                     PreserveIds = context.ParseResult.GetValueForOption(preserveIdsOption),
-                    Strict = context.ParseResult.GetValueForOption(strictOption)
+                    Strict = context.ParseResult.GetValueForOption(strictOption),
+                    AllowRemoteSync = context.ParseResult.GetValueForOption(allowRemoteSyncOption)
                 });
             });
 
@@ -194,6 +201,7 @@ public class Program
                     services.AddSingleton(args);
 
                     // Register services
+                    services.AddSingleton<ProductionTargetGuard>();
                     services.AddSingleton<RavenDbService>();
                     services.AddSingleton<LocalFileService>();
                     services.AddSingleton<RelativeDateResolver>();
@@ -227,6 +235,26 @@ public class Program
 
             Log.Information("Layouts: {Path}", layoutsPath);
             Log.Information("RavenDB: {Url}/{Database}", ravenOpts.Url, ravenOpts.Database);
+
+            // Production-target guard — classify the RavenDB URL and refuse Remote/Unknown
+            // targets unless the operator explicitly passed --allow-remote-sync. Applies to
+            // every mode (sync-once, watch, validate-only, fix-ids, dry-run) because any of
+            // them can leak host/credentials into logs against a non-localhost target, and
+            // the write-mode paths can overwrite real user data.
+            ProductionTargetGuard targetGuard =
+                host.Services.GetRequiredService<ProductionTargetGuard>();
+            bool allowed = targetGuard.Authorize(
+                url: ravenOpts.Url,
+                allowRemoteSync: args.AllowRemoteSync,
+                dryRun: args.DryRun,
+                layout: args.Layout,
+                preserveIds: args.PreserveIds,
+                strict: args.Strict,
+                clean: args.Clean);
+            if (!allowed)
+            {
+                return 3;
+            }
 
             // Get sync service
             DocumentSyncService syncService = host.Services.GetRequiredService<DocumentSyncService>();
@@ -272,18 +300,43 @@ public class Program
                 await watcher.WatchAsync(layoutsPath, args.Layout, args.DryRun, initialResult, cts.Token);
             }
 
-            // --strict: fail the run if duplicate entity identifiers were detected during sync.
-            // Detection-only: duplicates were logged (not deleted) by RavenDbService.
-            // Applies to every mode — sync-once, watch, validate-only, fix-ids — because any
-            // path that hits FindDocumentAsync accumulates DuplicateEntityIdentifierCount.
+            // Completion banner for Remote targets — mirrors the startup banner so the end
+            // of the log stream also surfaces the non-localhost target. No-op for Local.
+            targetGuard.EmitCompletionBanner(ravenOpts.Url, args.DryRun);
+
+            // --strict: fail the run if any validator emitted an offense during sync.
+            // Detection-only: nothing was deleted. Applies to every mode — sync-once,
+            // watch, validate-only, fix-ids — because each validator accumulates its count
+            // regardless of which code path triggered it. Exit code 2 is shared by all
+            // strict-mode failures; specific counts are logged for triage.
             RavenDbService ravenService = host.Services.GetRequiredService<RavenDbService>();
-            if (args.Strict && ravenService.DuplicateEntityIdentifierCount > 0)
+            SeedAuthorshipValidator authorshipValidator =
+                host.Services.GetRequiredService<SeedAuthorshipValidator>();
+
+            if (args.Strict)
             {
-                Log.Error(
-                    "--strict: {Count} duplicate entity identifier(s) detected during sync. See WARN lines above for document IDs. LayoutSync does not auto-delete entity duplicates; purge manually via RavenDB.",
-                    ravenService.DuplicateEntityIdentifierCount
-                );
-                return 2;
+                bool strictFailure = false;
+
+                if (ravenService.DuplicateEntityIdentifierCount > 0)
+                {
+                    Log.Error(
+                        "--strict: {Count} duplicate entity identifier(s) detected during sync. See WARN lines above for document IDs. LayoutSync does not auto-delete entity duplicates; purge manually via RavenDB.",
+                        ravenService.DuplicateEntityIdentifierCount
+                    );
+                    strictFailure = true;
+                }
+
+                if (authorshipValidator.AuthorshipWarningCount > 0)
+                {
+                    Log.Error(
+                        "--strict: {Count} seed file(s) with raw-NanoID identity references. Migrate those fields to `ext:{{provider}}:{{externalId}}` (see .claude/references/architecture-patterns.md, \"Stable Identity References\").",
+                        authorshipValidator.AuthorshipWarningCount
+                    );
+                    strictFailure = true;
+                }
+
+                if (strictFailure)
+                    return 2;
             }
 
             return 0;
@@ -319,4 +372,5 @@ public class CommandLineArgs
     public bool Verbose { get; init; }
     public bool PreserveIds { get; init; }
     public bool Strict { get; init; }
+    public bool AllowRemoteSync { get; init; }
 }

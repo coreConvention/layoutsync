@@ -269,6 +269,86 @@ public class SeedAuthorshipValidatorTests
         Assert.Empty(logger.Warnings);
     }
 
+    // ── Counter: AuthorshipWarningCount feeds --strict exit ──────────────────
+
+    [Fact]
+    public void AuthorshipWarningCount_StartsAtZero()
+    {
+        // Guards the --strict wiring: a fresh validator must report zero offenses so a
+        // clean sync never trips the strict gate.
+        (SeedAuthorshipValidator validator, _) = CreateValidator();
+
+        Assert.Equal(0, validator.AuthorshipWarningCount);
+    }
+
+    [Fact]
+    public void AuthorshipWarningCount_IncrementsOncePerOffendingFile()
+    {
+        // One WARN line is emitted per file (not per offending field). The counter must
+        // mirror that so operators see consistent numbers between logs and strict exit.
+        (SeedAuthorshipValidator validator, CapturingLogger logger) = CreateValidator();
+
+        JsonObject content = new()
+        {
+            ["indexes"] = new JsonObject
+            {
+                // Two offending fields in the same file — still one file-level offense.
+                ["adminIds"] = new JsonArray(NanoIdA),
+                ["ownerId"] = NanoIdB,
+            }
+        };
+
+        validator.Validate(DocumentType.Entity, "layouts/x/entities/a.json", content);
+
+        Assert.Single(logger.Warnings);
+        Assert.Equal(1, validator.AuthorshipWarningCount);
+    }
+
+    [Fact]
+    public void AuthorshipWarningCount_AccumulatesAcrossFiles()
+    {
+        // Multiple offending files bump the counter cumulatively — feeds the --strict
+        // summary at process exit ("--strict: N seed file(s) with raw-NanoID ...").
+        (SeedAuthorshipValidator validator, _) = CreateValidator();
+
+        JsonObject first = new()
+        {
+            ["indexes"] = new JsonObject { ["ownerId"] = NanoIdA }
+        };
+        JsonObject second = new()
+        {
+            ["indexes"] = new JsonObject { ["ownerId"] = NanoIdB }
+        };
+
+        validator.Validate(DocumentType.Entity, "layouts/x/entities/a.json", first);
+        validator.Validate(DocumentType.Entity, "layouts/x/entities/b.json", second);
+
+        Assert.Equal(2, validator.AuthorshipWarningCount);
+    }
+
+    [Fact]
+    public void AuthorshipWarningCount_DoesNotIncrementForCleanFiles()
+    {
+        // ext:*-only and non-entity files must not increment the counter, otherwise the
+        // strict gate would fire against well-formed seeds.
+        (SeedAuthorshipValidator validator, _) = CreateValidator();
+
+        JsonObject cleanEntity = new()
+        {
+            ["indexes"] = new JsonObject { ["ownerId"] = ExtRefA }
+        };
+        JsonObject nonEntity = new()
+        {
+            ["indexes"] = new JsonObject { ["ownerId"] = NanoIdA }
+        };
+
+        validator.Validate(DocumentType.Entity, "layouts/x/entities/clean.json", cleanEntity);
+        // Section documents are skipped entirely.
+        validator.Validate(DocumentType.Section, "layouts/x/sections/s.json", nonEntity);
+
+        Assert.Equal(0, validator.AuthorshipWarningCount);
+    }
+
     // ── Test plumbing ─────────────────────────────────────────────────────────
 
     /// <summary>
