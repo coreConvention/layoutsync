@@ -206,6 +206,7 @@ public class Program
                     services.AddSingleton<LocalFileService>();
                     services.AddSingleton<RelativeDateResolver>();
                     services.AddSingleton<SeedAuthorshipValidator>();
+                    services.AddSingleton<SeedCrossReferenceValidator>();
                     services.AddSingleton<DocumentSyncService>();
                     services.AddSingleton<FileWatcherService>();
                 })
@@ -304,38 +305,49 @@ public class Program
             // of the log stream also surfaces the non-localhost target. No-op for Local.
             targetGuard.EmitCompletionBanner(ravenOpts.Url, args.DryRun);
 
-            // --strict: fail the run if any validator emitted an offense during sync.
-            // Detection-only: nothing was deleted. Applies to every mode — sync-once,
-            // watch, validate-only, fix-ids — because each validator accumulates its count
-            // regardless of which code path triggered it. Exit code 2 is shared by all
-            // strict-mode failures; specific counts are logged for triage.
+            // --strict: fail the run with exit code 2 if any of the detection-only validators
+            // flagged something during sync. All of the following contribute to the same gate:
+            //   • duplicate entity identifiers (RavenDbService)
+            //   • raw-NanoID authorship warnings (SeedAuthorshipValidator, #308)
+            //   • dangling / unpinned-target cross-references (SeedCrossReferenceValidator, #300)
+            // Detection-only: none of these mutate state. Strict mode is the CI escalation hook.
             RavenDbService ravenService = host.Services.GetRequiredService<RavenDbService>();
             SeedAuthorshipValidator authorshipValidator =
                 host.Services.GetRequiredService<SeedAuthorshipValidator>();
+            SeedCrossReferenceValidator crossRefValidator =
+                host.Services.GetRequiredService<SeedCrossReferenceValidator>();
 
             if (args.Strict)
             {
-                bool strictFailure = false;
+                bool hasDuplicates = ravenService.DuplicateEntityIdentifierCount > 0;
+                bool hasAuthorshipWarnings = authorshipValidator.AuthorshipWarningCount > 0;
+                bool hasCrossRefViolations = crossRefValidator.WarningCount > 0;
 
-                if (ravenService.DuplicateEntityIdentifierCount > 0)
+                if (hasDuplicates)
                 {
                     Log.Error(
                         "--strict: {Count} duplicate entity identifier(s) detected during sync. See WARN lines above for document IDs. LayoutSync does not auto-delete entity duplicates; purge manually via RavenDB.",
                         ravenService.DuplicateEntityIdentifierCount
                     );
-                    strictFailure = true;
                 }
 
-                if (authorshipValidator.AuthorshipWarningCount > 0)
+                if (hasAuthorshipWarnings)
                 {
                     Log.Error(
                         "--strict: {Count} seed file(s) with raw-NanoID identity references. Migrate those fields to `ext:{{provider}}:{{externalId}}` (see .claude/references/architecture-patterns.md, \"Stable Identity References\").",
                         authorshipValidator.AuthorshipWarningCount
                     );
-                    strictFailure = true;
                 }
 
-                if (strictFailure)
+                if (hasCrossRefViolations)
+                {
+                    Log.Error(
+                        "--strict: {Count} seed file(s) contain cross-references whose target is either unpinned or missing. See WARN lines above for specific JSON paths.",
+                        crossRefValidator.WarningCount
+                    );
+                }
+
+                if (hasDuplicates || hasAuthorshipWarnings || hasCrossRefViolations)
                     return 2;
             }
 

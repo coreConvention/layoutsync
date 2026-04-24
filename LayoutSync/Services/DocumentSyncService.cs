@@ -18,6 +18,7 @@ public class DocumentSyncService(
     RavenDbService ravenService,
     RelativeDateResolver relativeDateResolver,
     SeedAuthorshipValidator seedAuthorshipValidator,
+    SeedCrossReferenceValidator seedCrossReferenceValidator,
     SyncOptions options,
     CommandLineArgs cliArgs)
 {
@@ -26,6 +27,7 @@ public class DocumentSyncService(
     private readonly RavenDbService _ravenService = ravenService;
     private readonly RelativeDateResolver _relativeDateResolver = relativeDateResolver;
     private readonly SeedAuthorshipValidator _seedAuthorshipValidator = seedAuthorshipValidator;
+    private readonly SeedCrossReferenceValidator _seedCrossReferenceValidator = seedCrossReferenceValidator;
     private readonly SyncOptions _options = options;
     private readonly CommandLineArgs _cliArgs = cliArgs;
 
@@ -46,6 +48,10 @@ public class DocumentSyncService(
     {
         Stopwatch sw = Stopwatch.StartNew();
         SyncBatchResult batch = new();
+
+        // Reset accumulator state at the start of every batch so prior-batch seeds
+        // (e.g. earlier watch-mode re-syncs) don't leak into this cross-reference pass.
+        _seedCrossReferenceValidator.Reset();
 
         // Track synced identifiers per collection for orphan detection
         // Keys must match GetCollection() output (lowercase)
@@ -89,6 +95,11 @@ public class DocumentSyncService(
         // Always detect orphans in static collections (deletion is conditional on cleanOrphans flag)
         await DetectOrphansAsync(batch, syncedIdentifiers, cleanOrphans, dryRun, ct);
 
+        // Cross-reference phase: after every file in the batch has been recorded, emit
+        // one WARN per offending referencer file where outbound NanoID refs point at
+        // a missing or unpinned owner. See issue #300.
+        _seedCrossReferenceValidator.ValidateAll();
+
         sw.Stop();
         batch.TotalDuration = sw.Elapsed;
 
@@ -126,6 +137,11 @@ public class DocumentSyncService(
         // Non-blocking policy nudge: flag raw NanoIDs in identity-bearing fields on entity seeds
         // so authors migrate to stable `ext:{provider}:{externalId}` refs. See issue #308.
         _seedAuthorshipValidator.Validate(doc.DocumentType, doc.RelativePath, contentToSync);
+
+        // Record this seed for the batch-end cross-reference check. The validator accumulates
+        // (declared id, pinned-ness, outbound NanoID-shaped references) per file and emits
+        // per-referencer warnings at batch end. See issue #300.
+        _seedCrossReferenceValidator.RecordSeed(doc.DocumentType, doc.RelativePath, contentToSync);
 
         // Inject layoutId for entity documents — entities must be scoped to a layout.
         // The layoutId is derived from the layout directory name (e.g., "layouts/dirt-life/" → "dirt-life").
