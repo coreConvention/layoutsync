@@ -198,6 +198,7 @@ public class Program
                     services.AddSingleton<LocalFileService>();
                     services.AddSingleton<RelativeDateResolver>();
                     services.AddSingleton<SeedAuthorshipValidator>();
+                    services.AddSingleton<SeedCrossReferenceValidator>();
                     services.AddSingleton<DocumentSyncService>();
                     services.AddSingleton<FileWatcherService>();
                 })
@@ -272,18 +273,38 @@ public class Program
                 await watcher.WatchAsync(layoutsPath, args.Layout, args.DryRun, initialResult, cts.Token);
             }
 
-            // --strict: fail the run if duplicate entity identifiers were detected during sync.
-            // Detection-only: duplicates were logged (not deleted) by RavenDbService.
-            // Applies to every mode — sync-once, watch, validate-only, fix-ids — because any
-            // path that hits FindDocumentAsync accumulates DuplicateEntityIdentifierCount.
+            // --strict: fail the run with exit code 2 if any of the detection-only validators
+            // flagged something during sync. All of the following contribute to the same gate:
+            //   • duplicate entity identifiers (RavenDbService)
+            //   • dangling / unpinned-target cross-references (SeedCrossReferenceValidator, #300)
+            // Detection-only: none of these mutate state. Strict mode is the CI escalation hook.
             RavenDbService ravenService = host.Services.GetRequiredService<RavenDbService>();
-            if (args.Strict && ravenService.DuplicateEntityIdentifierCount > 0)
+            SeedCrossReferenceValidator crossRefValidator =
+                host.Services.GetRequiredService<SeedCrossReferenceValidator>();
+
+            if (args.Strict)
             {
-                Log.Error(
-                    "--strict: {Count} duplicate entity identifier(s) detected during sync. See WARN lines above for document IDs. LayoutSync does not auto-delete entity duplicates; purge manually via RavenDB.",
-                    ravenService.DuplicateEntityIdentifierCount
-                );
-                return 2;
+                bool hasDuplicates = ravenService.DuplicateEntityIdentifierCount > 0;
+                bool hasCrossRefViolations = crossRefValidator.WarningCount > 0;
+
+                if (hasDuplicates)
+                {
+                    Log.Error(
+                        "--strict: {Count} duplicate entity identifier(s) detected during sync. See WARN lines above for document IDs. LayoutSync does not auto-delete entity duplicates; purge manually via RavenDB.",
+                        ravenService.DuplicateEntityIdentifierCount
+                    );
+                }
+
+                if (hasCrossRefViolations)
+                {
+                    Log.Error(
+                        "--strict: {Count} seed file(s) contain cross-references whose target is either unpinned or missing. See WARN lines above for specific JSON paths.",
+                        crossRefValidator.WarningCount
+                    );
+                }
+
+                if (hasDuplicates || hasCrossRefViolations)
+                    return 2;
             }
 
             return 0;
