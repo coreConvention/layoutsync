@@ -74,6 +74,17 @@ public enum DocumentType
     /// Layout-scoped — layoutId is injected automatically.
     /// </summary>
     EntityConfig,
+
+    /// <summary>
+    /// Theme override definition from themes/ folder.
+    /// Pre-wrapped with type "theme-definition".
+    /// Layout-scoped — layoutId is injected automatically from the directory path
+    /// (`layouts/{layoutId}/themes/*.json`). Each layout may ship at most one
+    /// theme; the API resolver matches the request's tenant context to this
+    /// stamped layoutId. Tenant-agnostic by design — no platform code or
+    /// LayoutSync logic branches on specific tenant identifiers.
+    /// </summary>
+    Theme,
 }
 
 /// <summary>
@@ -108,6 +119,7 @@ public static class DocumentTypeExtensions
         DocumentType.Workflow => "workflows",
         DocumentType.WritePolicy => "WritePolicies",
         DocumentType.EntityConfig => "entity-configs",
+        DocumentType.Theme => "theme-definitions",
         DocumentType.Identity => "identities",
         DocumentType.Entity => "entities",
         _ => "entities"
@@ -117,5 +129,5 @@ public static class DocumentTypeExtensions
     /// Returns true if the collection is safe for orphan cleanup (static data only).
     /// </summary>
     public static bool IsStaticCollection(this DocumentType type) =>
-        type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow or DocumentType.WritePolicy or DocumentType.EntityConfig;
+        type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow or DocumentType.WritePolicy or DocumentType.EntityConfig or DocumentType.Theme;
 }

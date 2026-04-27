@@ -174,6 +174,14 @@ public class LocalFileService(ILogger<LocalFileService> logger)
             // Entity configs folder
             foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "entity-configs")))
                 yield return file;
+
+            // Themes folder — layout-keyed CSS variable overrides
+            // (`layouts/{layoutId}/themes/*.json`). Each entity carries the
+            // override theme JSON in its `data` block; LayoutSync stamps the
+            // entity envelope's layoutId from the directory name so the API
+            // resolver can match it against the request tenant context.
+            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "themes")))
+                yield return file;
         }
     }
 
@@ -209,6 +217,7 @@ public class LocalFileService(ILogger<LocalFileService> logger)
                 "workflows" => DocumentType.Workflow,
                 "write-policies" => DocumentType.WritePolicy,
                 "entity-configs" => DocumentType.EntityConfig,
+                "themes" => DocumentType.Theme,
                 _ => DocumentType.Entity // Default to entity
             };
         }

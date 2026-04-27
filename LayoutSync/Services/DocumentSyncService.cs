@@ -65,7 +65,11 @@ public class DocumentSyncService(
             ["tags"] = [],
             ["workflows"] = [],
             ["WritePolicies"] = [],
-            ["entity-configs"] = []
+            ["entity-configs"] = [],
+            // Theme overrides (layout-keyed CSS variable deltas). Tracked here so
+            // orphan detection on `--clean` can prune theme entities whose source
+            // file was deleted from `layouts/{layoutId}/themes/`.
+            ["theme-definitions"] = []
         };
 
         IEnumerable<string> files = _fileService.DiscoverFiles(layoutsPath, layout);
@@ -147,7 +151,11 @@ public class DocumentSyncService(
         // The layoutId is derived from the layout directory name (e.g., "layouts/dirt-life/" → "dirt-life").
         // We always overwrite layoutId in the content to ensure consistency with the directory name.
         // System collections (sections, layouts, menus, modals, manifests, tags, workflows) are EXEMPT.
-        if ((doc.DocumentType == DocumentType.Entity || doc.DocumentType == DocumentType.WritePolicy || doc.DocumentType == DocumentType.EntityConfig) && !string.IsNullOrEmpty(doc.LayoutId))
+        // Themes are layout-scoped: the API resolver matches request tenant context to this stamped layoutId.
+        if ((doc.DocumentType == DocumentType.Entity
+             || doc.DocumentType == DocumentType.WritePolicy
+             || doc.DocumentType == DocumentType.EntityConfig
+             || doc.DocumentType == DocumentType.Theme) && !string.IsNullOrEmpty(doc.LayoutId))
         {
             contentToSync["layoutId"] = doc.LayoutId;
             _logger.LogDebug(
@@ -353,6 +361,8 @@ public class DocumentSyncService(
         "tags" => DocumentType.Tag,
         "workflows" => DocumentType.Workflow,
         "WritePolicies" => DocumentType.WritePolicy,
+        "entity-configs" => DocumentType.EntityConfig,
+        "theme-definitions" => DocumentType.Theme,
         _ => DocumentType.Entity
     };
 
@@ -538,6 +548,8 @@ public class DocumentSyncService(
         int tags = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Tag);
         int workflows = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Workflow);
         int writePolicies = batch.Results.Count(r => r.Document.DocumentType == DocumentType.WritePolicy);
+        int entityConfigs = batch.Results.Count(r => r.Document.DocumentType == DocumentType.EntityConfig);
+        int themes = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Theme);
         int entities = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Entity);
         int identities = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Identity);
 
@@ -551,6 +563,8 @@ public class DocumentSyncService(
         if (tags > 0) parts.Add($"{tags} tags");
         if (workflows > 0) parts.Add($"{workflows} workflows");
         if (writePolicies > 0) parts.Add($"{writePolicies} write policies");
+        if (entityConfigs > 0) parts.Add($"{entityConfigs} entity configs");
+        if (themes > 0) parts.Add($"{themes} themes");
         if (entities > 0) parts.Add($"{entities} entities");
         if (identities > 0) parts.Add($"{identities} identities");
 
