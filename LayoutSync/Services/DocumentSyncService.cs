@@ -286,6 +286,11 @@ public class DocumentSyncService(
 
     /// <summary>
     /// Detects orphaned documents in static collections (documents in DB but not in local files).
+    /// When <c>--layout X</c> is active (<see cref="CommandLineArgs.Layout"/> set), the candidate
+    /// set is filtered through <see cref="FilterOrphansForScope"/> so cross-tenant orphans
+    /// are excluded and globally-shared documents (no <c>layoutId</c>) are skipped — preventing
+    /// the data-loss class of bug from issue #235 while still allowing safe scoped cleanup
+    /// per issue #427.
     /// </summary>
     private async Task DetectOrphansAsync(
         SyncBatchResult batch,
@@ -294,27 +299,48 @@ public class DocumentSyncService(
         bool dryRun,
         CancellationToken ct)
     {
+        string? scopedLayoutId = string.IsNullOrEmpty(_cliArgs.Layout) ? null : _cliArgs.Layout;
+
         foreach ((string collection, HashSet<string> synced) in syncedIdentifiers)
         {
             if (ct.IsCancellationRequested)
                 break;
 
-            // Get all identifiers currently in the collection
-            Dictionary<string, string> existingDocs = await _ravenService.GetAllIdentifiersAsync(collection, ct);
+            // Get all identifiers currently in the collection (including their stamped layoutId).
+            Dictionary<string, RavenDbService.OrphanCandidate> existingDocs =
+                await _ravenService.GetAllIdentifiersAsync(collection, ct);
 
             // Find orphans (in DB but not synced from local files)
-            Dictionary<string, string> orphans = existingDocs
+            Dictionary<string, RavenDbService.OrphanCandidate> rawOrphans = existingDocs
                 .Where(kvp => !synced.Contains(kvp.Key))
                 .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+
+            // Apply layout-scope filter when --layout is active. Without a scope all candidates
+            // pass through (legacy unscoped clean). With a scope, only documents whose layoutId
+            // matches the scope are eligible; documents without a layoutId are skipped (they
+            // are globally-shared and cannot be safely attributed to a single tenant).
+            Dictionary<string, RavenDbService.OrphanCandidate> orphans =
+                FilterOrphansForScope(rawOrphans, scopedLayoutId);
+
+            int filteredOut = rawOrphans.Count - orphans.Count;
+            if (filteredOut > 0 && scopedLayoutId is not null)
+            {
+                _logger.LogDebug(
+                    "Scoped clean: skipped {FilteredOut} cross-tenant or unscoped candidate(s) in {Collection} (kept only layoutId={Layout})",
+                    filteredOut, collection, scopedLayoutId);
+            }
 
             if (orphans.Count == 0)
                 continue;
 
-            // Track orphans in batch result
-            batch.OrphansDetected[collection] = orphans;
+            // Track orphans in batch result. Project the richer OrphanCandidate dict back
+            // to (identifier -> docId) — the public batch model intentionally stays narrow.
+            batch.OrphansDetected[collection] = orphans
+                .ToDictionary(kvp => kvp.Key, kvp => kvp.Value.DocumentId);
 
-            foreach ((string identifier, string docId) in orphans)
+            foreach ((string identifier, RavenDbService.OrphanCandidate candidate) in orphans)
             {
+                string docId = candidate.DocumentId;
                 if (deleteOrphans && !dryRun)
                 {
                     // Actually delete the orphan
@@ -345,6 +371,35 @@ public class DocumentSyncService(
                 _logger.LogInformation("{Count} orphan(s) detected in {Collection}. Use --clean to remove.", orphans.Count, collection);
             }
         }
+    }
+
+    /// <summary>
+    /// Pure decision helper: filter the raw orphan set by an optional layout scope.
+    /// Extracted as <c>internal static</c> so it can be unit-tested without spinning up RavenDB.
+    ///
+    /// <list type="bullet">
+    ///   <item><description>When <paramref name="scopedLayoutId"/> is null/empty, all candidates pass through (legacy unscoped behavior).</description></item>
+    ///   <item><description>When <paramref name="scopedLayoutId"/> is set, only candidates whose <see cref="RavenDbService.OrphanCandidate.LayoutId"/> equals the scope are kept.</description></item>
+    ///   <item><description>Candidates with a null <c>LayoutId</c> are conservatively dropped under a scoped run — they belong to globally-shared collections (sections, layouts, menus, modals, manifests, tags, workflows) where the data model carries no tenant attribution, and a scoped operation must not delete documents it cannot prove belong to that tenant.</description></item>
+    /// </list>
+    ///
+    /// See issue #427 (and the predecessor data-loss incident #235).
+    /// </summary>
+    /// <param name="candidates">Raw orphan candidates already filtered to "in DB but not in synced files".</param>
+    /// <param name="scopedLayoutId">The active layout scope (the value of <c>--layout</c>), or null/empty for no scope.</param>
+    /// <returns>The subset of <paramref name="candidates"/> that should be considered for deletion under the active scope.</returns>
+    public static Dictionary<string, RavenDbService.OrphanCandidate> FilterOrphansForScope(
+        Dictionary<string, RavenDbService.OrphanCandidate> candidates,
+        string? scopedLayoutId)
+    {
+        if (string.IsNullOrEmpty(scopedLayoutId))
+        {
+            return candidates;
+        }
+
+        return candidates
+            .Where(kvp => kvp.Value.LayoutId == scopedLayoutId)
+            .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
     }
 
     /// <summary>

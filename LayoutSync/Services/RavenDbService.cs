@@ -357,24 +357,36 @@ public class RavenDbService : IDisposable
   }
 
   /// <summary>
-  /// Gets all identifiers from a specific collection.
-  /// Used for orphan detection in static collections.
+  /// Information about a candidate orphan returned by <see cref="GetAllIdentifiersAsync"/>.
+  /// <see cref="LayoutId"/> is null when the document does not stamp a <c>layoutId</c> field
+  /// (true for sections / layouts / menus / modals / manifests / tags / workflows). Layout-scoped
+  /// collections (WritePolicies, entity-configs, theme-definitions) populate it. Used by
+  /// orphan-scope filtering to keep <c>--clean</c> + <c>--layout</c> combos safe across tenants.
+  /// See issue #427.
+  /// </summary>
+  public sealed record OrphanCandidate(string DocumentId, string? LayoutId);
+
+  /// <summary>
+  /// Gets all identifiers from a specific collection plus their stamped <c>layoutId</c>
+  /// (when present). Used for orphan detection in static collections.
   /// </summary>
   /// <param name="collection">The RavenDB collection name (e.g., "Sections").</param>
   /// <param name="ct">Cancellation token.</param>
-  /// <returns>Dictionary mapping identifier to document ID.</returns>
-  public async Task<Dictionary<string, string>> GetAllIdentifiersAsync(
+  /// <returns>Dictionary mapping identifier to <see cref="OrphanCandidate"/> (document id + optional layoutId).</returns>
+  public async Task<Dictionary<string, OrphanCandidate>> GetAllIdentifiersAsync(
     string collection,
     CancellationToken ct = default
   )
   {
     using IAsyncDocumentSession session = _store.OpenAsyncSession();
-    Dictionary<string, string> result = [];
+    Dictionary<string, OrphanCandidate> result = [];
 
     try
     {
-      // Query all documents in the collection, getting identifier and @id
-      string query = $"from {collection} select identifier, id()";
+      // Project identifier, document id, and (optional) layoutId so callers can scope
+      // orphan detection by tenant. Documents without a layoutId field return null
+      // — the projection succeeds rather than throwing for missing fields.
+      string query = $"from {collection} select identifier, id(), layoutId";
       IAsyncRawDocumentQuery<dynamic> results = session.Advanced.AsyncRawQuery<dynamic>(query);
       List<dynamic> documents = await results.ToListAsync(ct);
 
@@ -382,10 +394,11 @@ public class RavenDbService : IDisposable
       {
         string? identifier = doc.identifier?.ToString();
         string? docId = doc["id()"]?.ToString();
+        string? layoutId = doc["layoutId"]?.ToString();
 
         if (!string.IsNullOrEmpty(identifier) && !string.IsNullOrEmpty(docId))
         {
-          result[identifier] = docId;
+          result[identifier] = new OrphanCandidate(docId, layoutId);
         }
       }
 

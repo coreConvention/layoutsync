@@ -161,16 +161,22 @@ public class Program
         {
             Log.Information("Layout Sync Tool v1.0");
 
-            // Guard: --clean cannot be combined with --layout.
-            // Orphan detection queries each static collection globally without a layoutId
-            // filter, so combining a scoped sync with cleanup flags all non-scoped docs
-            // as orphans and deletes them. Refuse the combination to prevent destructive
-            // cross-layout deletions. See issue #235.
+            // Scoped clean: --clean + --layout X is now SAFE because orphan detection filters
+            // candidates by the document's stamped layoutId. Documents that don't carry a
+            // layoutId field (sections, layouts, menus, modals, manifests, tags, workflows)
+            // are conservatively skipped from scoped runs — operators must run unscoped clean
+            // if they truly need to prune those collections. See issue #427.
+            //
+            // The original rejection (issue #235) was the safe-by-default response to the
+            // pre-filter implementation, which would have deleted *every* non-scoped document
+            // as an "orphan" relative to the scoped sync set. With the layoutId filter in
+            // DocumentSyncService.FilterOrphansForScope, that class of cross-tenant data loss
+            // can no longer occur from this combo.
             if (args.Clean && !string.IsNullOrEmpty(args.Layout))
             {
-                Log.Error("--clean cannot be combined with --layout. Clean only runs unscoped.");
-                Log.Error("Either sync all layouts with --clean, or sync a single layout without --clean.");
-                return 1;
+                Log.Information(
+                    "Scoped clean active: orphan deletion filtered to layoutId='{Layout}'. Documents without a layoutId (sections/layouts/menus/modals/manifests/tags/workflows) will be skipped — run unscoped --clean to prune those.",
+                    args.Layout);
             }
 
             // Build host
