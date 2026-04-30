@@ -8,19 +8,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Hosting and DI -->
+    <!-- Hosting and DI (exe-only — Core depends on logging abstractions only) -->
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
 
     <!-- Command-line parsing -->
     <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
 
-    <!-- RavenDB -->
-    <PackageReference Include="RavenDB.Client" Version="6.0.0" />
-
-    <!-- JSON diffing/patching -->
-    <PackageReference Include="JsonDiffPatch.Net" Version="2.3.0" />
-
-    <!-- Logging -->
+    <!-- Logging configuration (Core depends on the abstractions only) -->
     <PackageReference Include="Serilog.Extensions.Hosting" Version="10.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="5.0.1" />
 
@@ -31,9 +25,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Reference shared libraries from API -->
-    <ProjectReference Include="..\..\..\api\coreConvention\coreConvention.Core\coreConvention.Core.csproj" />
-    <ProjectReference Include="..\..\..\api\coreConvention\coreConvention.Core.Serialization\coreConvention.Core.Serialization.csproj" />
+    <!-- Library that contains Configuration, Models, and Services -->
+    <ProjectReference Include="..\LayoutSync.Core\LayoutSync.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>

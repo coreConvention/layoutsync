@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!--
+      Intentional mismatch: assembly name is LayoutSync.Core but the existing namespaces
+      are LayoutSync.Services / LayoutSync.Models / LayoutSync.Configuration. This keeps
+      Program.cs and the test suite call-sites untouched after extracting these directories
+      from the LayoutSync exe project. New files in this project should also use the
+      LayoutSync.* namespaces, not LayoutSync.Core.*.
+    -->
+    <RootNamespace>LayoutSync</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Logging abstractions (ILogger<T>) — services use this directly -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+
+    <!-- RavenDB — used by RavenDbService -->
+    <PackageReference Include="RavenDB.Client" Version="6.0.0" />
+
+    <!-- JSON diffing/patching — used by manifest mutation services for RFC 6902 diff output -->
+    <PackageReference Include="JsonDiffPatch.Net" Version="2.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Reference shared libraries from API -->
+    <ProjectReference Include="..\..\..\api\coreConvention\coreConvention.Core\coreConvention.Core.csproj" />
+    <ProjectReference Include="..\..\..\api\coreConvention\coreConvention.Core.Serialization\coreConvention.Core.Serialization.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Test assembly can call internal helpers (Levenshtein, NearestMatches) directly. -->
+    <InternalsVisibleTo Include="LayoutSync.Tests" />
+  </ItemGroup>
+</Project>

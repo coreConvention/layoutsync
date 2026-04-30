@@ -14,10 +14,12 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <!-- 10.0.5+ required to satisfy ModelContextProtocol's transitive dep (NU1605) -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.5" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\LayoutSync\LayoutSync.csproj" />
+    <ProjectReference Include="..\LayoutSync.Core\LayoutSync.Core.csproj" />
+    <ProjectReference Include="..\LayoutSync.Mcp\LayoutSync.Mcp.csproj" />
   </ItemGroup>
 </Project>

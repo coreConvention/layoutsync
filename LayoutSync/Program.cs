@@ -137,6 +137,11 @@ public class Program
                 });
             });
 
+        // Subcommand: `layoutsync manifest set-route ...` and `layoutsync manifest from-json ...`.
+        // These have their own option set (--json, --on-error, etc.) and a minimal DI host
+        // that omits RavenDB — manifest mutation is a file-only operation.
+        rootCommand.AddCommand(ManifestCommands.Build());
+
         return await rootCommand.InvokeAsync(args);
     }
 
@@ -371,24 +376,3 @@ public class Program
     }
 }
 
-/// <summary>
-/// Command-line arguments parsed from the command line.
-/// </summary>
-public class CommandLineArgs
-{
-    public string? LayoutsPath { get; init; }
-    public string? RavenUrl { get; init; }
-    public string? Database { get; init; }
-    public string? CertificatePath { get; init; }
-    public string? CertificatePassword { get; init; }
-    public string? Layout { get; init; }
-    public bool SyncOnce { get; init; }
-    public bool ValidateOnly { get; init; }
-    public bool FixIds { get; init; }
-    public bool DryRun { get; init; }
-    public bool Clean { get; init; }
-    public bool Verbose { get; init; }
-    public bool PreserveIds { get; init; }
-    public bool Strict { get; init; }
-    public bool AllowRemoteSync { get; init; }
-}
