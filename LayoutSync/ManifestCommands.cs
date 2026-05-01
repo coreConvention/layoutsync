@@ -79,7 +79,11 @@ public static class ManifestCommands
 
         Option<string?> layoutsPathOpt = new(
             aliases: ["--layouts-path", "-p"],
-            description: "Path to layouts/ directory. Defaults to current working directory./layouts.");
+            description: "Path to layouts/ directory. When omitted, LayoutSync walks up from CWD looking for a `layouts/` ancestor (auto-resolution).");
+
+        Option<bool> allowCrossWorktreeSyncOpt = new(
+            aliases: ["--allow-cross-worktree-sync"],
+            description: "Explicit opt-in to mutate a layouts directory OUTSIDE the current worktree. Without this flag, LayoutSync refuses cross-worktree mutations and exits with code 4. See issue #526.");
 
         Option<bool> dryRunOpt = new(
             aliases: ["--dry-run"],
@@ -105,6 +109,7 @@ public static class ManifestCommands
         cmd.AddOption(patchSidebarOpt);
         cmd.AddOption(removePatchOpt);
         cmd.AddOption(layoutsPathOpt);
+        cmd.AddOption(allowCrossWorktreeSyncOpt);
         cmd.AddOption(dryRunOpt);
         cmd.AddOption(jsonOpt);
         cmd.AddOption(strictOpt);
@@ -120,6 +125,7 @@ public static class ManifestCommands
                 PatchSidebarCsv: context.ParseResult.GetValueForOption(patchSidebarOpt),
                 RemovePatch: context.ParseResult.GetValueForOption(removePatchOpt) ?? [],
                 LayoutsPath: context.ParseResult.GetValueForOption(layoutsPathOpt),
+                AllowCrossWorktreeSync: context.ParseResult.GetValueForOption(allowCrossWorktreeSyncOpt),
                 DryRun: context.ParseResult.GetValueForOption(dryRunOpt),
                 Json: context.ParseResult.GetValueForOption(jsonOpt),
                 Strict: context.ParseResult.GetValueForOption(strictOpt),
@@ -154,7 +160,11 @@ public static class ManifestCommands
 
         Option<string?> layoutsPathOpt = new(
             aliases: ["--layouts-path", "-p"],
-            description: "Path to layouts/ directory. Defaults to current working directory./layouts.");
+            description: "Path to layouts/ directory. When omitted, LayoutSync walks up from CWD looking for a `layouts/` ancestor (auto-resolution).");
+
+        Option<bool> allowCrossWorktreeSyncOpt = new(
+            aliases: ["--allow-cross-worktree-sync"],
+            description: "Explicit opt-in to mutate a layouts directory OUTSIDE the current worktree. Without this flag, LayoutSync refuses cross-worktree mutations and exits with code 4. See issue #526.");
 
         Option<bool> dryRunOpt = new(["--dry-run"], "Compute the diff but do not write the manifest.");
         Option<bool> jsonOpt = new(["--json"], "Emit a stable JSON envelope on stdout (logs go to stderr).");
@@ -165,6 +175,7 @@ public static class ManifestCommands
         cmd.AddArgument(patchesFileArg);
         cmd.AddOption(onErrorOpt);
         cmd.AddOption(layoutsPathOpt);
+        cmd.AddOption(allowCrossWorktreeSyncOpt);
         cmd.AddOption(dryRunOpt);
         cmd.AddOption(jsonOpt);
         cmd.AddOption(strictOpt);
@@ -176,6 +187,7 @@ public static class ManifestCommands
                 PatchesFile: context.ParseResult.GetValueForArgument(patchesFileArg),
                 OnError: context.ParseResult.GetValueForOption(onErrorOpt) ?? "abort",
                 LayoutsPath: context.ParseResult.GetValueForOption(layoutsPathOpt),
+                AllowCrossWorktreeSync: context.ParseResult.GetValueForOption(allowCrossWorktreeSyncOpt),
                 DryRun: context.ParseResult.GetValueForOption(dryRunOpt),
                 Json: context.ParseResult.GetValueForOption(jsonOpt),
                 Strict: context.ParseResult.GetValueForOption(strictOpt),
@@ -206,6 +218,19 @@ public static class ManifestCommands
                 RemoveSidebar: removeSidebar);
 
             using IHost host = BuildManifestHost();
+
+            // Worktree-mismatch guard (issue #526) — runs BEFORE the manifest is touched
+            // so a misdirected mutation refuses with exit 4 instead of silently writing to
+            // the wrong working tree. Mirrors the sync flow's wiring (Program.cs, #520).
+            WorktreePathGuard worktreeGuard = host.Services.GetRequiredService<WorktreePathGuard>();
+            if (!worktreeGuard.Authorize(
+                    currentDirectory: Directory.GetCurrentDirectory(),
+                    layoutsPath: layoutsPath,
+                    allowCrossWorktreeSync: args.AllowCrossWorktreeSync))
+            {
+                return 4;
+            }
+
             ManifestMutationService service = host.Services.GetRequiredService<ManifestMutationService>();
             ManifestSectionValidator validator = host.Services.GetRequiredService<ManifestSectionValidator>();
 
@@ -245,6 +270,19 @@ public static class ManifestCommands
             BatchErrorMode mode = args.OnError == "skip" ? BatchErrorMode.Skip : BatchErrorMode.Abort;
 
             using IHost host = BuildManifestHost();
+
+            // Worktree-mismatch guard (issue #526) — runs BEFORE the batch is applied so a
+            // misdirected mutation refuses with exit 4 instead of silently writing to the
+            // wrong working tree. Mirrors the sync flow's wiring (Program.cs, #520).
+            WorktreePathGuard worktreeGuard = host.Services.GetRequiredService<WorktreePathGuard>();
+            if (!worktreeGuard.Authorize(
+                    currentDirectory: Directory.GetCurrentDirectory(),
+                    layoutsPath: layoutsPath,
+                    allowCrossWorktreeSync: args.AllowCrossWorktreeSync))
+            {
+                return 4;
+            }
+
             ManifestMutationService service = host.Services.GetRequiredService<ManifestMutationService>();
             ManifestSectionValidator validator = host.Services.GetRequiredService<ManifestSectionValidator>();
 
@@ -286,6 +324,10 @@ public static class ManifestCommands
                 services.AddSingleton<LocalFileService>();
                 services.AddSingleton<ManifestSectionValidator>();
                 services.AddSingleton<ManifestMutationService>();
+                // Worktree-mismatch guard (issue #526) — refuses cross-worktree mutations
+                // unless the operator opts in via --allow-cross-worktree-sync. Mirrors the
+                // sync flow's wiring (Program.cs, post-#520).
+                services.AddSingleton<WorktreePathGuard>();
             })
             .Build();
     }
@@ -316,21 +358,35 @@ public static class ManifestCommands
     }
 
     /// <summary>
-    /// Resolves the layouts/ directory: explicit flag wins; otherwise defaults to
-    /// <c>{cwd}/layouts</c>. Throws when neither resolves to an existing directory.
+    /// Resolves the layouts/ directory. Explicit <c>--layouts-path</c> wins; otherwise
+    /// delegates to <see cref="LayoutsPathResolver.Resolve"/> to walk up from CWD looking
+    /// for a <c>layouts/</c> ancestor (post-#526 — mirrors the sync flow's auto-resolve
+    /// shipped in #520, eliminating the prior literal <c>{cwd}/layouts</c> default that
+    /// only worked from the worktree root, not from subdirectories).
+    /// Throws when neither resolves to an existing directory.
     /// </summary>
     private static string ResolveLayoutsPath(string? explicitPath)
     {
-        string candidate = !string.IsNullOrEmpty(explicitPath)
-            ? Path.IsPathRooted(explicitPath)
+        if (!string.IsNullOrEmpty(explicitPath))
+        {
+            string explicitCandidate = Path.IsPathRooted(explicitPath)
                 ? explicitPath
-                : Path.GetFullPath(explicitPath, Directory.GetCurrentDirectory())
-            : Path.Combine(Directory.GetCurrentDirectory(), "layouts");
+                : Path.GetFullPath(explicitPath, Directory.GetCurrentDirectory());
 
-        if (!Directory.Exists(candidate))
-            throw new DirectoryNotFoundException($"Layouts directory not found: {candidate}");
+            if (!Directory.Exists(explicitCandidate))
+                throw new DirectoryNotFoundException($"Layouts directory not found: {explicitCandidate}");
 
-        return candidate;
+            return explicitCandidate;
+        }
+
+        string? autoResolved = LayoutsPathResolver.Resolve(Directory.GetCurrentDirectory());
+        if (autoResolved is null)
+        {
+            throw new DirectoryNotFoundException(
+                "Layouts directory not found by walking up from CWD. Pass --layouts-path or run from a directory whose ancestors contain a `layouts/` folder.");
+        }
+
+        return autoResolved;
     }
 
     /// <summary>
@@ -519,6 +575,7 @@ public static class ManifestCommands
         string? PatchSidebarCsv,
         IReadOnlyList<string> RemovePatch,
         string? LayoutsPath,
+        bool AllowCrossWorktreeSync,
         bool DryRun,
         bool Json,
         bool Strict,
@@ -528,6 +585,7 @@ public static class ManifestCommands
         string PatchesFile,
         string OnError,
         string? LayoutsPath,
+        bool AllowCrossWorktreeSync,
         bool DryRun,
         bool Json,
         bool Strict,

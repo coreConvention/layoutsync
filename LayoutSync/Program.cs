@@ -94,6 +94,11 @@ public class Program
             description: "Explicit opt-in to sync against a non-localhost RavenDB target. Without this flag, LayoutSync refuses to write to Remote or Unknown targets and exits with code 3.")
         { IsRequired = false };
 
+        Option<bool> allowCrossWorktreeSyncOption = new(
+            aliases: ["--allow-cross-worktree-sync"],
+            description: "Explicit opt-in to sync against a layouts directory OUTSIDE the current worktree. Without this flag, LayoutSync refuses cross-worktree syncs and exits with code 4. See issue #520.")
+        { IsRequired = false };
+
         // Create root command
         RootCommand rootCommand = new("Layout Sync Tool - Syncs layouts/ to RavenDB with NanoID enforcement")
         {
@@ -111,7 +116,8 @@ public class Program
             verboseOption,
             preserveIdsOption,
             strictOption,
-            allowRemoteSyncOption
+            allowRemoteSyncOption,
+            allowCrossWorktreeSyncOption
         };
 
         rootCommand.SetHandler(
@@ -133,7 +139,8 @@ public class Program
                     Verbose = context.ParseResult.GetValueForOption(verboseOption),
                     PreserveIds = context.ParseResult.GetValueForOption(preserveIdsOption),
                     Strict = context.ParseResult.GetValueForOption(strictOption),
-                    AllowRemoteSync = context.ParseResult.GetValueForOption(allowRemoteSyncOption)
+                    AllowRemoteSync = context.ParseResult.GetValueForOption(allowRemoteSyncOption),
+                    AllowCrossWorktreeSync = context.ParseResult.GetValueForOption(allowCrossWorktreeSyncOption)
                 });
             });
 
@@ -213,6 +220,7 @@ public class Program
 
                     // Register services
                     services.AddSingleton<ProductionTargetGuard>();
+                    services.AddSingleton<WorktreePathGuard>();
                     services.AddSingleton<RavenDbService>();
                     services.AddSingleton<LocalFileService>();
                     services.AddSingleton<RelativeDateResolver>();
@@ -227,10 +235,27 @@ public class Program
             SyncOptions options = host.Services.GetRequiredService<SyncOptions>();
             RavenDbOptions ravenOpts = host.Services.GetRequiredService<RavenDbOptions>();
 
+            // Auto-walk-up: if neither --layouts-path nor SyncOptions:LayoutsPath provided
+            // a value, try to resolve a `layouts/` directory by walking up from CWD. This
+            // makes the common case (run LayoutSync from inside a worktree) implicitly
+            // correct — see issue #520. Failure to find one falls through to the existing
+            // "Layouts path is required" error below.
+            if (string.IsNullOrEmpty(options.LayoutsPath))
+            {
+                string? autoResolved = LayoutsPathResolver.Resolve(Directory.GetCurrentDirectory());
+                if (autoResolved != null)
+                {
+                    options.LayoutsPath = autoResolved;
+                    Log.Information(
+                        "Auto-resolved --layouts-path from CWD walk-up: {Path}",
+                        autoResolved);
+                }
+            }
+
             // Validate layouts path is provided
             if (string.IsNullOrEmpty(options.LayoutsPath))
             {
-                Log.Error("Layouts path is required. Use --layouts-path or set SyncOptions:LayoutsPath in config.");
+                Log.Error("Layouts path is required. Use --layouts-path or set SyncOptions:LayoutsPath in config (or run from a directory whose ancestors contain a `layouts/` folder for auto-resolution).");
                 return 1;
             }
 
@@ -247,6 +272,24 @@ public class Program
 
             Log.Information("Layouts: {Path}", layoutsPath);
             Log.Information("RavenDB: {Url}/{Database}", ravenOpts.Url, ravenOpts.Database);
+
+            // Worktree-mismatch guard — issue #520. When CWD is inside a w31rd.com
+            // worktree (`.claude/worktrees/<name>/`) but the resolved layouts-path is
+            // OUTSIDE that worktree, refuse the run. This catches the silent-failure
+            // pattern where an explicit --layouts-path pointed at the main repo while
+            // the operator was editing files in a worktree, causing LayoutSync to sync
+            // stale main content as if it were the worktree edits. Runs BEFORE the
+            // production-target guard so the more proximate "your local edits aren't
+            // what's about to ship" error fires first.
+            WorktreePathGuard worktreeGuard =
+                host.Services.GetRequiredService<WorktreePathGuard>();
+            if (!worktreeGuard.Authorize(
+                    currentDirectory: Directory.GetCurrentDirectory(),
+                    layoutsPath: layoutsPath,
+                    allowCrossWorktreeSync: args.AllowCrossWorktreeSync))
+            {
+                return 4;
+            }
 
             // Production-target guard — classify the RavenDB URL and refuse Remote/Unknown
             // targets unless the operator explicitly passed --allow-remote-sync. Applies to
