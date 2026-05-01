@@ -42,9 +42,36 @@ public class LocalFileService(ILogger<LocalFileService> logger)
                 return null;
             }
 
-            string relativePath = Path.GetRelativePath(layoutsBasePath, filePath).Replace('\\', '/');
-            DocumentType docType = DetermineDocumentType(relativePath);
-            string? layoutId = ExtractLayoutId(relativePath);
+            string relativePath;
+            DocumentType docType;
+            string? layoutId;
+
+            // Platform-scoped themes live in `<layoutsParent>/themes/*.json` — a
+            // sibling directory to the layouts root. They are recognized by path
+            // prefix, get DocumentType.Theme, and carry NO layoutId (the API
+            // resolver treats them as the platform catalogue available to every
+            // tenant). All other files use the layout-scoped relative path under
+            // `layoutsBasePath`.
+            string platformThemesPath = GetPlatformThemesDirectory(layoutsBasePath);
+            bool isPlatformTheme = !string.IsNullOrEmpty(platformThemesPath)
+                && filePath.StartsWith(platformThemesPath, StringComparison.OrdinalIgnoreCase);
+
+            if (isPlatformTheme)
+            {
+                // Anchor the relative path on the layouts parent so it reads as
+                // `themes/{themeId}.json` — keeping log lines and validator output
+                // human-readable without any synthetic sentinel segments.
+                string layoutsParent = Path.GetDirectoryName(platformThemesPath) ?? layoutsBasePath;
+                relativePath = Path.GetRelativePath(layoutsParent, filePath).Replace('\\', '/');
+                docType = DocumentType.Theme;
+                layoutId = null;
+            }
+            else
+            {
+                relativePath = Path.GetRelativePath(layoutsBasePath, filePath).Replace('\\', '/');
+                docType = DetermineDocumentType(relativePath);
+                layoutId = ExtractLayoutId(relativePath);
+            }
 
             // Extract id and identifier from content
             // Check for top-level "id" first, then fall back to "@metadata.@id" (RavenDB format)
@@ -102,7 +129,11 @@ public class LocalFileService(ILogger<LocalFileService> logger)
     }
 
     /// <summary>
-    /// Discovers all JSON files in a layouts directory.
+    /// Discovers all JSON files in a layouts directory, plus platform-scoped
+    /// theme files from a sibling <c>themes/</c> directory (the platform
+    /// catalogue, available to every tenant). Platform-scoped discovery is
+    /// SKIPPED when <paramref name="specificLayout"/> is set — a tenant-scoped
+    /// sync should not touch the platform catalogue.
     /// </summary>
     public IEnumerable<string> DiscoverFiles(string layoutsPath, string? specificLayout = null)
     {
@@ -183,6 +214,37 @@ public class LocalFileService(ILogger<LocalFileService> logger)
             foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "themes")))
                 yield return file;
         }
+
+        // Platform theme catalogue — `<layoutsParent>/themes/*.json` (sibling to
+        // the layouts root). These are platform-scoped: no layoutId, available
+        // to every tenant. Skipped under `--layout` because a tenant-scoped run
+        // should not redundantly re-sync the catalogue on every iteration.
+        if (string.IsNullOrEmpty(specificLayout))
+        {
+            string platformThemesPath = GetPlatformThemesDirectory(layoutsPath);
+            foreach (string file in GetJsonFiles(platformThemesPath))
+                yield return file;
+        }
+    }
+
+    /// <summary>
+    /// Resolves the canonical platform-themes directory: a <c>themes/</c> folder
+    /// sibling to the layouts root. Returns an empty string if the parent path
+    /// cannot be derived (defensive: prevents matching against an empty prefix
+    /// in <c>ReadDocumentAsync</c>).
+    /// </summary>
+    public static string GetPlatformThemesDirectory(string layoutsBasePath)
+    {
+        if (string.IsNullOrEmpty(layoutsBasePath))
+        {
+            return string.Empty;
+        }
+
+        string trimmed = layoutsBasePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string? parent = Path.GetDirectoryName(trimmed);
+        return string.IsNullOrEmpty(parent)
+            ? string.Empty
+            : Path.Combine(parent, "themes");
     }
 
     private static IEnumerable<string> GetJsonFiles(string directory)

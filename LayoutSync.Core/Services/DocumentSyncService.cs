@@ -151,7 +151,10 @@ public class DocumentSyncService(
         // The layoutId is derived from the layout directory name (e.g., "layouts/dirt-life/" → "dirt-life").
         // We always overwrite layoutId in the content to ensure consistency with the directory name.
         // System collections (sections, layouts, menus, modals, manifests, tags, workflows) are EXEMPT.
-        // Themes are layout-scoped: the API resolver matches request tenant context to this stamped layoutId.
+        // Themes have two flavors: layout-scoped overrides (LayoutId set, the resolver matches
+        // request tenant context) and the platform catalogue (LayoutId null/empty, available to
+        // every tenant via /api/init). The null-guard below short-circuits stamping for the
+        // platform-scoped flavor so those documents stay layoutId-less.
         if ((doc.DocumentType == DocumentType.Entity
              || doc.DocumentType == DocumentType.WritePolicy
              || doc.DocumentType == DocumentType.EntityConfig

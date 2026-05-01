@@ -76,13 +76,21 @@ public enum DocumentType
     EntityConfig,
 
     /// <summary>
-    /// Theme override definition from themes/ folder.
-    /// Pre-wrapped with type "theme-definition".
-    /// Layout-scoped — layoutId is injected automatically from the directory path
-    /// (`layouts/{layoutId}/themes/*.json`). Each layout may ship at most one
-    /// theme; the API resolver matches the request's tenant context to this
-    /// stamped layoutId. Tenant-agnostic by design — no platform code or
-    /// LayoutSync logic branches on specific tenant identifiers.
+    /// Theme definition from a <c>themes/</c> folder.
+    /// Pre-wrapped with type "theme-definition". Two scopes are supported:
+    /// <list type="bullet">
+    ///   <item><description><b>Layout-scoped overrides</b> live in <c>layouts/{layoutId}/themes/*.json</c>.
+    ///   LayoutSync stamps <c>layoutId</c> from the directory name; the API
+    ///   resolver paints these on top of the active platform theme when the
+    ///   request's tenant context matches.</description></item>
+    ///   <item><description><b>Platform catalogue</b> lives in <c>&lt;layoutsParent&gt;/themes/*.json</c>
+    ///   (sibling to the layouts root). No <c>layoutId</c> is stamped; the
+    ///   API serves these as the base catalogue available to every tenant
+    ///   via <c>/api/init</c>'s <c>availableThemes</c> field.</description></item>
+    /// </list>
+    /// Tenant-agnostic by design — no platform code or LayoutSync logic
+    /// branches on specific tenant identifiers; scope is determined by the
+    /// presence (or absence) of <c>layoutId</c> on the document.
     /// </summary>
     Theme,
 }
