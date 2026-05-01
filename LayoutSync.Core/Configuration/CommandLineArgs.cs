@@ -23,4 +23,5 @@ public class CommandLineArgs
     public bool PreserveIds { get; init; }
     public bool Strict { get; init; }
     public bool AllowRemoteSync { get; init; }
+    public bool AllowCrossWorktreeSync { get; init; }
 }
