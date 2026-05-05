@@ -22,12 +22,13 @@
 
     <!-- JSON diffing/patching — used by manifest mutation services for RFC 6902 diff output -->
     <PackageReference Include="JsonDiffPatch.Net" Version="2.3.0" />
-  </ItemGroup>
 
-  <ItemGroup>
-    <!-- Reference shared libraries from API -->
-    <ProjectReference Include="..\..\..\api\coreConvention\coreConvention.Core\coreConvention.Core.csproj" />
-    <ProjectReference Include="..\..\..\api\coreConvention\coreConvention.Core.Serialization\coreConvention.Core.Serialization.csproj" />
+    <!-- NanoID validation — used by Vendored/Validation/NanoIdValidator.cs -->
+    <PackageReference Include="Nanoid" Version="3.0.0" />
+
+    <!-- Newtonsoft.Json — used by Vendored/Serialization/Converters/Newtonsoft/*.cs.
+         Already pulled transitively by RavenDB.Client, declared explicitly for clarity. -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
 
   <ItemGroup>
