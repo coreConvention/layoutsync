@@ -13,6 +13,7 @@ using Newtonsoft.Json.Serialization;
 using Raven.Client.Documents;
 using Raven.Client.Documents.Operations;
 using Raven.Client.Documents.Session;
+using Raven.Client.Exceptions;
 using Raven.Client.Json.Serialization.NewtonsoftJson;
 
 namespace LayoutSync.Services;
@@ -63,6 +64,13 @@ public class RavenDbService : IDisposable
       Certificate = certificate,
       Conventions =
       {
+        // Defense in depth against ordering races. With this on, a StoreAsync
+        // for an @id that already exists on the server (from a concurrent
+        // writer — another LayoutSync, a human editing in RavenDB Studio)
+        // throws ConcurrencyException instead of silently overwriting.
+        // CreateDocumentAsync / ReplaceDocumentAsync catch and re-try once.
+        UseOptimisticConcurrency = true,
+
         // CRITICAL: Prevent CLR type name storage in @metadata
         // This stops RavenDB from adding Raven-Clr-Type metadata
         FindClrTypeName = _ => null,
@@ -284,33 +292,58 @@ public class RavenDbService : IDisposable
     CancellationToken ct = default
   )
   {
-    using IAsyncDocumentSession session = _store.OpenAsyncSession();
+    string collection = doc.DocumentType.GetCollection();
+    // Convert once — re-used by the retry path.
+    string json = content.ToJsonString();
+    // NanoID for fresh creates is stable across the retry (regenerating would
+    // mask the conflict by sidestepping it).
+    string docId = existingDocId ?? NanoIdValidator.GenerateNanoId();
 
-    try
+    async Task<string?> AttemptAsync()
     {
-      // Route to correct collection based on document type
-      string collection = doc.DocumentType.GetCollection();
-
-      // Convert JsonObject to ExpandoObject using custom converter for proper native types
-      string json = content.ToJsonString();
+      using IAsyncDocumentSession session = _store.OpenAsyncSession();
       ExpandoObject entity = System.Text.Json.JsonSerializer.Deserialize<ExpandoObject>(json, ExpandoSerializerOptions)
         ?? new ExpandoObject();
 
-      // Use existing @id if provided (for replacements), otherwise generate new NanoID
-      // Note: Just use NanoID without collection prefix - collection is set via @metadata
-      string docId = existingDocId ?? NanoIdValidator.GenerateNanoId();
-
-      // Store with explicit ID
       await session.StoreAsync(entity, docId, ct);
-
-      // Explicitly set collection metadata (RavenDB determines collection from this)
       IMetadataDictionary metadata = session.Advanced.GetMetadataFor(entity);
       metadata["@collection"] = collection;
-
       await session.SaveChangesAsync(ct);
-
-      _logger.LogInformation("Created document: {DocumentId} in {Collection}", docId, collection);
       return docId;
+    }
+
+    try
+    {
+      string? result = await AttemptAsync();
+      _logger.LogInformation("Created document: {DocumentId} in {Collection}", docId, collection);
+      return result;
+    }
+    catch (ConcurrencyException ex)
+    {
+      // Concurrent writer beat us to this @id. Retry once with a fresh session;
+      // if the conflicting write has already cleared we'll succeed, otherwise we
+      // surface the conflict so the next file event can re-trigger with the
+      // up-to-date local content (which may now agree with what landed).
+      _logger.LogWarning(
+        "Concurrency conflict creating {DocumentId} in {Collection}: {Message}. Retrying once.",
+        docId, collection, ex.Message);
+
+      try
+      {
+        string? result = await AttemptAsync();
+        _logger.LogInformation("Created document (after retry): {DocumentId} in {Collection}", docId, collection);
+        return result;
+      }
+      catch (ConcurrencyException retryEx)
+      {
+        _logger.LogError(
+          retryEx,
+          "Concurrency conflict creating {DocumentId} in {Collection} persists after retry. " +
+          "Another writer (LayoutSync instance, RavenDB Studio edit, etc.) holds this @id. " +
+          "Save the local file again to re-sync once the conflict clears.",
+          docId, collection);
+        throw;
+      }
     }
     catch (Exception ex)
     {

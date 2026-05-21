@@ -99,6 +99,16 @@ public class Program
             description: "Explicit opt-in to sync against a layouts directory OUTSIDE the current worktree. Without this flag, LayoutSync refuses cross-worktree syncs and exits with code 4. See issue #520.")
         { IsRequired = false };
 
+        Option<int?> debounceMsOption = new(
+            aliases: ["--debounce-ms"],
+            description: "Override debounce delay (ms) between file events and sync. Default 100. Set to 0 (or use --no-debounce) for fastest cadence; safe because batches are serialized.")
+        { IsRequired = false };
+
+        Option<bool> noDebounceOption = new(
+            aliases: ["--no-debounce"],
+            description: "Equivalent to --debounce-ms 0. Fires sync on the next thread-pool tick after a file event.")
+        { IsRequired = false };
+
         // Create root command
         RootCommand rootCommand = new("Layout Sync Tool - Syncs layouts/ to RavenDB with NanoID enforcement")
         {
@@ -117,7 +127,9 @@ public class Program
             preserveIdsOption,
             strictOption,
             allowRemoteSyncOption,
-            allowCrossWorktreeSyncOption
+            allowCrossWorktreeSyncOption,
+            debounceMsOption,
+            noDebounceOption
         };
 
         rootCommand.SetHandler(
@@ -140,7 +152,9 @@ public class Program
                     PreserveIds = context.ParseResult.GetValueForOption(preserveIdsOption),
                     Strict = context.ParseResult.GetValueForOption(strictOption),
                     AllowRemoteSync = context.ParseResult.GetValueForOption(allowRemoteSyncOption),
-                    AllowCrossWorktreeSync = context.ParseResult.GetValueForOption(allowCrossWorktreeSyncOption)
+                    AllowCrossWorktreeSync = context.ParseResult.GetValueForOption(allowCrossWorktreeSyncOption),
+                    DebounceMs = context.ParseResult.GetValueForOption(debounceMsOption),
+                    NoDebounce = context.ParseResult.GetValueForOption(noDebounceOption)
                 });
             });
 
@@ -213,6 +227,14 @@ public class Program
                         ravenOptions.CertificatePath = args.CertificatePath;
                     if (!string.IsNullOrEmpty(args.CertificatePassword))
                         ravenOptions.CertificatePassword = args.CertificatePassword;
+
+                    // Debounce overrides: --no-debounce wins, then --debounce-ms, else
+                    // whatever appsettings/default supplied. 0 is a valid explicit value
+                    // (FileWatcherService treats it as "next thread-pool tick").
+                    if (args.NoDebounce)
+                        syncOptions.DebounceMs = 0;
+                    else if (args.DebounceMs.HasValue)
+                        syncOptions.DebounceMs = args.DebounceMs.Value;
 
                     services.AddSingleton(syncOptions);
                     services.AddSingleton(ravenOptions);

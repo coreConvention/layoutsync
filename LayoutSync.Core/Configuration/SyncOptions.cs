@@ -14,8 +14,10 @@ public class SyncOptions
     /// <summary>
     /// Debounce delay in milliseconds for file change events.
     /// Prevents multiple rapid syncs when files are being edited.
+    /// Set to 0 (or use <c>--no-debounce</c>) for fastest cadence; safe because
+    /// FileWatcherService serializes batches per a SemaphoreSlim gate.
     /// </summary>
-    public int DebounceMs { get; set; } = 500;
+    public int DebounceMs { get; set; } = 100;
 
     /// <summary>
     /// Number of retry attempts for failed sync operations.
