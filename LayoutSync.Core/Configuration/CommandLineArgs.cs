@@ -24,4 +24,17 @@ public class CommandLineArgs
     public bool Strict { get; init; }
     public bool AllowRemoteSync { get; init; }
     public bool AllowCrossWorktreeSync { get; init; }
+
+    /// <summary>
+    /// Optional override for <see cref="SyncOptions.DebounceMs"/>. Null means "use
+    /// appsettings / default". 0 means "fire on the next thread-pool tick" — safe
+    /// because FileWatcherService serializes batches via a SemaphoreSlim gate.
+    /// </summary>
+    public int? DebounceMs { get; init; }
+
+    /// <summary>
+    /// Convenience flag equivalent to <c>--debounce-ms 0</c>. When true, overrides
+    /// any other DebounceMs source.
+    /// </summary>
+    public bool NoDebounce { get; init; }
 }

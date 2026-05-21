@@ -23,6 +23,10 @@ public class FileWatcherService(
     private readonly ConcurrentDictionary<string, DateTime> _pendingFiles = new();
     private readonly ConcurrentDictionary<string, DateTime> _pendingDeletions = new();
     private readonly ConcurrentDictionary<string, TrackedFile> _trackedFiles = new(StringComparer.OrdinalIgnoreCase);
+    // Serializes batch processing so two timer fires can't overlap and produce
+    // concurrent SyncFileAsync calls for the same path (older payload would
+    // silently overwrite the newer one if its round-trip finished last).
+    private readonly SemaphoreSlim _processGate = new(1, 1);
     private Timer? _debounceTimer;
     private Timer? _deletionDebounceTimer;
     private string _layoutsPath = string.Empty;
@@ -210,12 +214,15 @@ public class FileWatcherService(
     {
         _pendingFiles[filePath] = DateTime.UtcNow;
 
-        // Reset debounce timer
+        // Reset debounce timer. Timer callback is void; the lambda discards the
+        // Task. ProcessPendingFiles has its own gate + per-file try/catch, so any
+        // exception that escapes (e.g. semaphore disposed during shutdown) only
+        // hits UnobservedTaskException — by design no longer fatal in .NET 6+.
         _debounceTimer?.Dispose();
         _debounceTimer = new Timer(
-            ProcessPendingFiles,
+            state => _ = ProcessPendingFiles(state),
             null,
-            _options.DebounceMs,
+            EffectiveDebounceMs(),
             Timeout.Infinite
         );
     }
@@ -230,117 +237,145 @@ public class FileWatcherService(
         // Reset deletion debounce timer
         _deletionDebounceTimer?.Dispose();
         _deletionDebounceTimer = new Timer(
-            ProcessPendingDeletions,
+            state => _ = ProcessPendingDeletions(state),
             null,
-            _options.DebounceMs,
+            EffectiveDebounceMs(),
             Timeout.Infinite
         );
     }
+
+    /// <summary>
+    /// DebounceMs == 0 means "fire on the next thread-pool tick" — we still go
+    /// through the Timer so the ConcurrentDictionary coalescing path is shared
+    /// with the normal debounce case.
+    /// </summary>
+    private int EffectiveDebounceMs() => _options.DebounceMs == 0 ? 1 : _options.DebounceMs;
 
     /// <summary>
     /// Tracked info for pending deletions (separate from _trackedFiles which gets cleared on delete).
     /// </summary>
     private readonly ConcurrentDictionary<string, TrackedFile> _pendingDeletionInfo = new(StringComparer.OrdinalIgnoreCase);
 
-    private async void ProcessPendingFiles(object? state)
+    private async Task ProcessPendingFiles(object? state)
     {
-        // Take snapshot of pending files
-        List<string> filesToProcess = _pendingFiles.Keys.ToList();
-        _pendingFiles.Clear();
-
-        foreach (string filePath in filesToProcess)
+        // Serialize with any in-flight batch (and with deletions) so two timer
+        // fires cannot produce concurrent SyncFileAsync calls for the same
+        // path. Events that arrive while we wait coalesce into _pendingFiles
+        // (it was cleared by the prior batch), so the next batch picks them
+        // up with a fresh file-read at the start of SyncFileAsync.
+        await _processGate.WaitAsync();
+        try
         {
-            try
+            List<string> filesToProcess = _pendingFiles.Keys.ToList();
+            _pendingFiles.Clear();
+
+            foreach (string filePath in filesToProcess)
             {
-                _logger.LogInformation("Changed: {Path}", Path.GetRelativePath(_layoutsPath, filePath));
-                SyncResult result = await _syncService.SyncFileAsync(filePath, _layoutsPath, _dryRun);
-
-                if (result.Success)
+                try
                 {
-                    string action = result.Action switch
-                    {
-                        SyncAction.Created => "Created",
-                        SyncAction.Patched => "Patched",
-                        SyncAction.Recreated => "Recreated",
-                        _ => "Synced"
-                    };
-                    _logger.LogInformation("-> {Action} '{Identifier}'", action, result.Document.Identifier);
+                    _logger.LogInformation("Changed: {Path}", Path.GetRelativePath(_layoutsPath, filePath));
+                    SyncResult result = await _syncService.SyncFileAsync(filePath, _layoutsPath, _dryRun);
 
-                    // Update tracking for this file
-                    if (!string.IsNullOrEmpty(result.Document.Identifier))
+                    if (result.Success)
                     {
-                        _trackedFiles[filePath] = new TrackedFile(
-                            result.Document.Identifier,
-                            result.Document.DocumentType,
-                            result.RavenDocumentId);
+                        string action = result.Action switch
+                        {
+                            SyncAction.Created => "Created",
+                            SyncAction.Patched => "Patched",
+                            SyncAction.Recreated => "Recreated",
+                            _ => "Synced"
+                        };
+                        _logger.LogInformation("-> {Action} '{Identifier}'", action, result.Document.Identifier);
+
+                        // Update tracking for this file
+                        if (!string.IsNullOrEmpty(result.Document.Identifier))
+                        {
+                            _trackedFiles[filePath] = new TrackedFile(
+                                result.Document.Identifier,
+                                result.Document.DocumentType,
+                                result.RavenDocumentId);
+                        }
+
+                        if (result.Document.HasHumanReadableId)
+                        {
+                            _logger.LogWarning("-> Human-readable id '{Id}' detected", result.Document.Id);
+                        }
                     }
-
-                    if (result.Document.HasHumanReadableId)
+                    else
                     {
-                        _logger.LogWarning("-> Human-readable id '{Id}' detected", result.Document.Id);
+                        _logger.LogError("-> Sync failed: {Error}", result.ErrorMessage);
                     }
                 }
-                else
+                catch (Exception ex)
                 {
-                    _logger.LogError("-> Sync failed: {Error}", result.ErrorMessage);
+                    _logger.LogError(ex, "Error processing file: {Path}", filePath);
                 }
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error processing file: {Path}", filePath);
-            }
+        }
+        finally
+        {
+            _processGate.Release();
         }
     }
 
-    private async void ProcessPendingDeletions(object? state)
+    private async Task ProcessPendingDeletions(object? state)
     {
-        // Take snapshot of pending deletions
-        List<string> filesToProcess = _pendingDeletions.Keys.ToList();
-        _pendingDeletions.Clear();
-
-        int deletedCount = 0;
-        int failedCount = 0;
-
-        foreach (string filePath in filesToProcess)
+        // Shares the gate with ProcessPendingFiles: a delete must not race a
+        // sync for the same path (e.g. rename = delete-old + create-new).
+        await _processGate.WaitAsync();
+        try
         {
-            if (!_pendingDeletionInfo.TryRemove(filePath, out TrackedFile? tracked))
-                continue;
+            List<string> filesToProcess = _pendingDeletions.Keys.ToList();
+            _pendingDeletions.Clear();
 
-            try
+            int deletedCount = 0;
+            int failedCount = 0;
+
+            foreach (string filePath in filesToProcess)
             {
-                string relativePath = Path.GetRelativePath(_layoutsPath, filePath);
-                _logger.LogInformation("Deleting from DB: {Path} ({Identifier})", relativePath, tracked.Identifier);
+                if (!_pendingDeletionInfo.TryRemove(filePath, out TrackedFile? tracked))
+                    continue;
 
-                SyncResult result = await _syncService.DeleteTrackedDocumentAsync(
-                    tracked.Identifier,
-                    tracked.DocumentType,
-                    tracked.RavenDocumentId,
-                    _dryRun);
+                try
+                {
+                    string relativePath = Path.GetRelativePath(_layoutsPath, filePath);
+                    _logger.LogInformation("Deleting from DB: {Path} ({Identifier})", relativePath, tracked.Identifier);
 
-                if (result.Success && result.Action == SyncAction.Deleted)
-                {
-                    deletedCount++;
+                    SyncResult result = await _syncService.DeleteTrackedDocumentAsync(
+                        tracked.Identifier,
+                        tracked.DocumentType,
+                        tracked.RavenDocumentId,
+                        _dryRun);
+
+                    if (result.Success && result.Action == SyncAction.Deleted)
+                    {
+                        deletedCount++;
+                    }
+                    else if (result.Action == SyncAction.Skipped)
+                    {
+                        _logger.LogDebug("-> Skipped: {Reason}", result.ErrorMessage);
+                    }
+                    else
+                    {
+                        failedCount++;
+                        _logger.LogError("-> Delete failed: {Error}", result.ErrorMessage);
+                    }
                 }
-                else if (result.Action == SyncAction.Skipped)
-                {
-                    _logger.LogDebug("-> Skipped: {Reason}", result.ErrorMessage);
-                }
-                else
+                catch (Exception ex)
                 {
                     failedCount++;
-                    _logger.LogError("-> Delete failed: {Error}", result.ErrorMessage);
+                    _logger.LogError(ex, "Error deleting document for file: {Path}", filePath);
                 }
             }
-            catch (Exception ex)
+
+            if (deletedCount > 0 || failedCount > 0)
             {
-                failedCount++;
-                _logger.LogError(ex, "Error deleting document for file: {Path}", filePath);
+                _logger.LogInformation("Deletion batch: {Deleted} deleted, {Failed} failed", deletedCount, failedCount);
             }
         }
-
-        if (deletedCount > 0 || failedCount > 0)
+        finally
         {
-            _logger.LogInformation("Deletion batch: {Deleted} deleted, {Failed} failed", deletedCount, failedCount);
+            _processGate.Release();
         }
     }
 }
