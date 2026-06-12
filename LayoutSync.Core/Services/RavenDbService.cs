@@ -393,7 +393,7 @@ public class RavenDbService : IDisposable
   /// Information about a candidate orphan returned by <see cref="GetAllIdentifiersAsync"/>.
   /// <see cref="LayoutId"/> is null when the document does not stamp a <c>layoutId</c> field
   /// (true for sections / layouts / menus / modals / manifests / tags / workflows). Layout-scoped
-  /// collections (WritePolicies, entity-configs, theme-definitions) populate it. Used by
+  /// collections (WritePolicies, ReadPolicies, entity-configs, theme-definitions) populate it. Used by
   /// orphan-scope filtering to keep <c>--clean</c> + <c>--layout</c> combos safe across tenants.
   /// See issue #427.
   /// </summary>
