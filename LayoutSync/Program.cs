@@ -248,6 +248,7 @@ public class Program
                     services.AddSingleton<RelativeDateResolver>();
                     services.AddSingleton<SeedAuthorshipValidator>();
                     services.AddSingleton<SeedCrossReferenceValidator>();
+                    services.AddSingleton<DeadWidgetPropValidator>();
                     services.AddSingleton<DocumentSyncService>();
                     services.AddSingleton<FileWatcherService>();
                 })
@@ -386,18 +387,22 @@ public class Program
             //   • duplicate entity identifiers (RavenDbService)
             //   • raw-NanoID authorship warnings (SeedAuthorshipValidator, #308)
             //   • dangling / unpinned-target cross-references (SeedCrossReferenceValidator, #300)
+            //   • dead/no-op widget props on sections (DeadWidgetPropValidator, #984)
             // Detection-only: none of these mutate state. Strict mode is the CI escalation hook.
             RavenDbService ravenService = host.Services.GetRequiredService<RavenDbService>();
             SeedAuthorshipValidator authorshipValidator =
                 host.Services.GetRequiredService<SeedAuthorshipValidator>();
             SeedCrossReferenceValidator crossRefValidator =
                 host.Services.GetRequiredService<SeedCrossReferenceValidator>();
+            DeadWidgetPropValidator deadPropValidator =
+                host.Services.GetRequiredService<DeadWidgetPropValidator>();
 
             if (args.Strict)
             {
                 bool hasDuplicates = ravenService.DuplicateEntityIdentifierCount > 0;
                 bool hasAuthorshipWarnings = authorshipValidator.AuthorshipWarningCount > 0;
                 bool hasCrossRefViolations = crossRefValidator.WarningCount > 0;
+                bool hasDeadProps = deadPropValidator.DeadPropWarningCount > 0;
 
                 if (hasDuplicates)
                 {
@@ -423,7 +428,15 @@ public class Program
                     );
                 }
 
-                if (hasDuplicates || hasAuthorshipWarnings || hasCrossRefViolations)
+                if (hasDeadProps)
+                {
+                    Log.Error(
+                        "--strict: {Count} section file(s) contain dead/no-op widget props (e.g. `defaultExpanded` on a floating-panel element, which the widget never reads). See WARN lines above for specific JSON paths and docs/systems/floating-panel-system.md.",
+                        deadPropValidator.DeadPropWarningCount
+                    );
+                }
+
+                if (hasDuplicates || hasAuthorshipWarnings || hasCrossRefViolations || hasDeadProps)
                     return 2;
             }
 
