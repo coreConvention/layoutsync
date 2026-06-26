@@ -19,6 +19,7 @@ public class DocumentSyncService(
     RelativeDateResolver relativeDateResolver,
     SeedAuthorshipValidator seedAuthorshipValidator,
     SeedCrossReferenceValidator seedCrossReferenceValidator,
+    DeadWidgetPropValidator deadWidgetPropValidator,
     SyncOptions options,
     CommandLineArgs cliArgs)
 {
@@ -28,6 +29,7 @@ public class DocumentSyncService(
     private readonly RelativeDateResolver _relativeDateResolver = relativeDateResolver;
     private readonly SeedAuthorshipValidator _seedAuthorshipValidator = seedAuthorshipValidator;
     private readonly SeedCrossReferenceValidator _seedCrossReferenceValidator = seedCrossReferenceValidator;
+    private readonly DeadWidgetPropValidator _deadWidgetPropValidator = deadWidgetPropValidator;
     private readonly SyncOptions _options = options;
     private readonly CommandLineArgs _cliArgs = cliArgs;
 
@@ -146,6 +148,11 @@ public class DocumentSyncService(
         // (declared id, pinned-ness, outbound NanoID-shaped references) per file and emits
         // per-referencer warnings at batch end. See issue #300.
         _seedCrossReferenceValidator.RecordSeed(doc.DocumentType, doc.RelativePath, contentToSync);
+
+        // Non-blocking nudge: flag dead/no-op widget props on section schemas (e.g. `defaultExpanded`
+        // on a floating-panel element, which the widget never reads). Type-scoped so legitimate
+        // props on other widgets are not false-flagged. See w31rd.com issue #984.
+        _deadWidgetPropValidator.Validate(doc.DocumentType, doc.RelativePath, contentToSync);
 
         // Inject layoutId for entity documents — entities must be scoped to a layout.
         // The layoutId is derived from the layout directory name (e.g., "layouts/dirt-life/" → "dirt-life").
