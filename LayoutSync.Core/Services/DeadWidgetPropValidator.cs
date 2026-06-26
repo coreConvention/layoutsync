@@ -26,9 +26,18 @@ namespace LayoutSync.Services;
 /// an offense counter, and is consulted by <c>--strict</c> mode to fail the process with exit
 /// code 2 when any offenses were detected. Detection-only — never auto-corrects.
 /// </summary>
-public class DeadWidgetPropValidator(ILogger<DeadWidgetPropValidator> logger)
+public class DeadWidgetPropValidator(ILogger<DeadWidgetPropValidator> logger) : ISeedValidator
 {
     private readonly ILogger<DeadWidgetPropValidator> _logger = logger;
+
+    /// <inheritdoc />
+    public string Name => "dead-widget-prop";
+
+    /// <inheritdoc />
+    public string StrictWarningDetail =>
+        "section file(s) contain dead/no-op widget props (e.g. `defaultExpanded` on a floating-panel "
+        + "element, which the widget never reads). See WARN lines above for specific JSON paths and "
+        + "docs/systems/floating-panel-system.md.";
 
     /// <summary>
     /// Known dead/no-op props, keyed by the widget <c>type</c> on which they have no effect. A
@@ -43,14 +52,14 @@ public class DeadWidgetPropValidator(ILogger<DeadWidgetPropValidator> logger)
         };
 
     /// <summary>
-    /// Number of section files that emitted at least one dead-prop warning during this service's
-    /// lifetime. Consumed by <c>--strict</c> mode in <c>Program.cs</c> to fail the sync.
+    /// Number of section files that emitted at least one dead-prop warning during the current
+    /// batch. Consumed by <c>--strict</c> mode in <c>Program.cs</c> to fail the sync.
     ///
     /// One offense per file (not per prop) so a section with three dead props counts as a single
     /// offense — matches the operator-facing WARN-per-file log shape and
-    /// <see cref="SeedAuthorshipValidator.AuthorshipWarningCount"/>'s semantics.
+    /// <see cref="SeedAuthorshipValidator.WarningCount"/>'s semantics.
     /// </summary>
-    public int DeadPropWarningCount { get; private set; }
+    public int WarningCount { get; private set; }
 
     /// <summary>
     /// Inspects a wrapped section document's <c>data</c> widget tree for dead props and emits a
@@ -59,7 +68,7 @@ public class DeadWidgetPropValidator(ILogger<DeadWidgetPropValidator> logger)
     /// <param name="documentType">Document type as classified by LayoutSync.</param>
     /// <param name="relativePath">Relative path used in the warning message.</param>
     /// <param name="content">Wrapped content (identifier/type/active/tags/indexes/data). Not mutated.</param>
-    public void Validate(DocumentType documentType, string relativePath, JsonObject content)
+    public void Inspect(DocumentType documentType, string relativePath, JsonObject content)
     {
         if (documentType != DocumentType.Section)
             return;
@@ -73,7 +82,7 @@ public class DeadWidgetPropValidator(ILogger<DeadWidgetPropValidator> logger)
         if (offendingPaths.Count == 0)
             return;
 
-        DeadPropWarningCount++;
+        WarningCount++;
 
         _logger.LogWarning(
             "Section uses dead/no-op widget prop(s) the renderer never reads — remove them.\n"
@@ -88,7 +97,7 @@ public class DeadWidgetPropValidator(ILogger<DeadWidgetPropValidator> logger)
     /// Resets the offense counter. Useful for tests that share a single validator instance across
     /// cases. Production callers (singleton DI) should not reset.
     /// </summary>
-    public void Reset() => DeadPropWarningCount = 0;
+    public void Reset() => WarningCount = 0;
 
     /// <summary>
     /// Depth-first walk of the widget subtree. For every object whose <c>type</c> has a dead-prop

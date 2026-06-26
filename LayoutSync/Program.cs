@@ -246,9 +246,13 @@ public class Program
                     services.AddSingleton<RavenDbService>();
                     services.AddSingleton<LocalFileService>();
                     services.AddSingleton<RelativeDateResolver>();
-                    services.AddSingleton<SeedAuthorshipValidator>();
-                    services.AddSingleton<SeedCrossReferenceValidator>();
-                    services.AddSingleton<DeadWidgetPropValidator>();
+                    // Seed validators are registered via ISeedValidator and injected into
+                    // DocumentSyncService as IEnumerable<ISeedValidator>. Registration order is
+                    // iteration order; the current three are order-independent. Adding a validator
+                    // is a single line here + one new class — nothing else changes. See issue #7.
+                    services.AddSingleton<ISeedValidator, SeedAuthorshipValidator>();
+                    services.AddSingleton<ISeedValidator, SeedCrossReferenceValidator>();
+                    services.AddSingleton<ISeedValidator, DeadWidgetPropValidator>();
                     services.AddSingleton<DocumentSyncService>();
                     services.AddSingleton<FileWatcherService>();
                 })
@@ -390,20 +394,14 @@ public class Program
             //   • dead/no-op widget props on sections (DeadWidgetPropValidator, #984)
             // Detection-only: none of these mutate state. Strict mode is the CI escalation hook.
             RavenDbService ravenService = host.Services.GetRequiredService<RavenDbService>();
-            SeedAuthorshipValidator authorshipValidator =
-                host.Services.GetRequiredService<SeedAuthorshipValidator>();
-            SeedCrossReferenceValidator crossRefValidator =
-                host.Services.GetRequiredService<SeedCrossReferenceValidator>();
-            DeadWidgetPropValidator deadPropValidator =
-                host.Services.GetRequiredService<DeadWidgetPropValidator>();
+            // Same singleton instances DocumentSyncService was injected with, so their counters
+            // reflect the sync that just ran. Looping here means a future validator joins the
+            // strict gate automatically — no per-validator if-block to add. See issue #7.
+            IEnumerable<ISeedValidator> validators = host.Services.GetServices<ISeedValidator>();
 
             if (args.Strict)
             {
                 bool hasDuplicates = ravenService.DuplicateEntityIdentifierCount > 0;
-                bool hasAuthorshipWarnings = authorshipValidator.AuthorshipWarningCount > 0;
-                bool hasCrossRefViolations = crossRefValidator.WarningCount > 0;
-                bool hasDeadProps = deadPropValidator.DeadPropWarningCount > 0;
-
                 if (hasDuplicates)
                 {
                     Log.Error(
@@ -412,31 +410,17 @@ public class Program
                     );
                 }
 
-                if (hasAuthorshipWarnings)
+                bool anyValidatorWarnings = false;
+                foreach (ISeedValidator validator in validators)
                 {
-                    Log.Error(
-                        "--strict: {Count} seed file(s) with raw-NanoID identity references. Migrate those fields to `ext:{{provider}}:{{externalId}}` (see .claude/references/architecture-patterns.md, \"Stable Identity References\").",
-                        authorshipValidator.AuthorshipWarningCount
-                    );
+                    if (validator.WarningCount > 0)
+                    {
+                        anyValidatorWarnings = true;
+                        Log.Error("--strict: {Count} {Detail}", validator.WarningCount, validator.StrictWarningDetail);
+                    }
                 }
 
-                if (hasCrossRefViolations)
-                {
-                    Log.Error(
-                        "--strict: {Count} seed file(s) contain cross-references whose target is either unpinned or missing. See WARN lines above for specific JSON paths.",
-                        crossRefValidator.WarningCount
-                    );
-                }
-
-                if (hasDeadProps)
-                {
-                    Log.Error(
-                        "--strict: {Count} section file(s) contain dead/no-op widget props (e.g. `defaultExpanded` on a floating-panel element, which the widget never reads). See WARN lines above for specific JSON paths and docs/systems/floating-panel-system.md.",
-                        deadPropValidator.DeadPropWarningCount
-                    );
-                }
-
-                if (hasDuplicates || hasAuthorshipWarnings || hasCrossRefViolations || hasDeadProps)
+                if (hasDuplicates || anyValidatorWarnings)
                     return 2;
             }
 

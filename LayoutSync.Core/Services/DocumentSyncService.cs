@@ -17,9 +17,7 @@ public class DocumentSyncService(
     LocalFileService fileService,
     RavenDbService ravenService,
     RelativeDateResolver relativeDateResolver,
-    SeedAuthorshipValidator seedAuthorshipValidator,
-    SeedCrossReferenceValidator seedCrossReferenceValidator,
-    DeadWidgetPropValidator deadWidgetPropValidator,
+    IEnumerable<ISeedValidator> validators,
     SyncOptions options,
     CommandLineArgs cliArgs)
 {
@@ -27,9 +25,10 @@ public class DocumentSyncService(
     private readonly LocalFileService _fileService = fileService;
     private readonly RavenDbService _ravenService = ravenService;
     private readonly RelativeDateResolver _relativeDateResolver = relativeDateResolver;
-    private readonly SeedAuthorshipValidator _seedAuthorshipValidator = seedAuthorshipValidator;
-    private readonly SeedCrossReferenceValidator _seedCrossReferenceValidator = seedCrossReferenceValidator;
-    private readonly DeadWidgetPropValidator _deadWidgetPropValidator = deadWidgetPropValidator;
+    // Strategy collection: every detection-only seed validator is driven through the same
+    // Reset → Inspect (per file) → FinalizeBatch lifecycle. Adding a validator is one new class +
+    // one DI line — no edits here. See issue #7.
+    private readonly IEnumerable<ISeedValidator> _validators = validators;
     private readonly SyncOptions _options = options;
     private readonly CommandLineArgs _cliArgs = cliArgs;
 
@@ -51,9 +50,10 @@ public class DocumentSyncService(
         Stopwatch sw = Stopwatch.StartNew();
         SyncBatchResult batch = new();
 
-        // Reset accumulator state at the start of every batch so prior-batch seeds
-        // (e.g. earlier watch-mode re-syncs) don't leak into this cross-reference pass.
-        _seedCrossReferenceValidator.Reset();
+        // Reset every validator's accumulator/counter state at the start of every batch so
+        // prior-batch state (e.g. earlier watch-mode re-syncs) doesn't leak into this pass.
+        foreach (ISeedValidator validator in _validators)
+            validator.Reset();
 
         // Track synced identifiers per collection for orphan detection
         // Keys must match GetCollection() output (lowercase)
@@ -101,10 +101,12 @@ public class DocumentSyncService(
         // Always detect orphans in static collections (deletion is conditional on cleanOrphans flag)
         await DetectOrphansAsync(batch, syncedIdentifiers, cleanOrphans, dryRun, ct);
 
-        // Cross-reference phase: after every file in the batch has been recorded, emit
-        // one WARN per offending referencer file where outbound NanoID refs point at
-        // a missing or unpinned owner. See issue #300.
-        _seedCrossReferenceValidator.ValidateAll();
+        // Batch-end phase: stateful, multi-phase validators run their deferred cross-check now
+        // that every file has been inspected (e.g. cross-reference emits one WARN per offending
+        // referencer whose outbound NanoID refs point at a missing/unpinned owner — issue #300).
+        // Single-phase validators inherit a no-op FinalizeBatch.
+        foreach (ISeedValidator validator in _validators)
+            validator.FinalizeBatch();
 
         sw.Stop();
         batch.TotalDuration = sw.Elapsed;
@@ -140,19 +142,12 @@ public class DocumentSyncService(
         // All JSON files should already have wrapper structure
         JsonObject contentToSync = doc.Content ?? new JsonObject();
 
-        // Non-blocking policy nudge: flag raw NanoIDs in identity-bearing fields on entity seeds
-        // so authors migrate to stable `ext:{provider}:{externalId}` refs. See issue #308.
-        _seedAuthorshipValidator.Validate(doc.DocumentType, doc.RelativePath, contentToSync);
-
-        // Record this seed for the batch-end cross-reference check. The validator accumulates
-        // (declared id, pinned-ness, outbound NanoID-shaped references) per file and emits
-        // per-referencer warnings at batch end. See issue #300.
-        _seedCrossReferenceValidator.RecordSeed(doc.DocumentType, doc.RelativePath, contentToSync);
-
-        // Non-blocking nudge: flag dead/no-op widget props on section schemas (e.g. `defaultExpanded`
-        // on a floating-panel element, which the widget never reads). Type-scoped so legitimate
-        // props on other widgets are not false-flagged. See w31rd.com issue #984.
-        _deadWidgetPropValidator.Validate(doc.DocumentType, doc.RelativePath, contentToSync);
+        // Detection-only nudge pass: every seed validator inspects this file. Each is non-blocking
+        // and pure (contentToSync is never mutated) — authorship flags raw NanoIDs in identity
+        // fields (#308), cross-reference accumulates seed metadata for the batch-end check (#300),
+        // dead-widget-prop flags no-op section props (w31rd #984). See issue #7 for the strategy.
+        foreach (ISeedValidator validator in _validators)
+            validator.Inspect(doc.DocumentType, doc.RelativePath, contentToSync);
 
         // Inject layoutId for entity documents — entities must be scoped to a layout.
         // The layoutId is derived from the layout directory name (e.g., "layouts/dirt-life/" → "dirt-life").

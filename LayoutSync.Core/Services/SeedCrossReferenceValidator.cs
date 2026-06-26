@@ -22,17 +22,20 @@ namespace LayoutSync.Services;
 /// <c>indexes.*</c> and <c>data.*</c> are inspected for NanoID-shaped cross-references.
 /// Tagged refs (<c>ext:*</c>), empty strings, and non-NanoID-shaped scalars are ignored.
 ///
-/// Lifecycle: <see cref="RecordSeed(DocumentType, string, JsonObject)"/> is called during
+/// Lifecycle: <see cref="Inspect(DocumentType, string, JsonObject)"/> is called during
 /// <c>SyncFileAsync</c> to accumulate per-file metadata (declared id, pinned-ness, outbound
-/// reference list). After the full batch completes, <see cref="ValidateAll"/> performs the
+/// reference list). After the full batch completes, <see cref="FinalizeBatch"/> performs the
 /// cross-check and emits one aggregated warning per offending referencer file.
 ///
 /// Tenant-agnostic: this validator reasons about NanoID grammar and cross-reference structure
 /// only. It never knows or branches on tenant identifiers.
 /// </summary>
-public partial class SeedCrossReferenceValidator(ILogger<SeedCrossReferenceValidator> logger)
+public partial class SeedCrossReferenceValidator(ILogger<SeedCrossReferenceValidator> logger) : ISeedValidator
 {
     private readonly ILogger<SeedCrossReferenceValidator> _logger = logger;
+
+    /// <inheritdoc />
+    public string Name => "cross-reference";
 
     /// <summary>
     /// Accumulator of every seed file seen in the current sync batch, keyed by the file's
@@ -41,12 +44,17 @@ public partial class SeedCrossReferenceValidator(ILogger<SeedCrossReferenceValid
     private readonly Dictionary<string, SeedRecord> _seeds = [];
 
     /// <summary>
-    /// Count of warning lines emitted during the most recent <see cref="ValidateAll"/> pass.
+    /// Count of warning lines emitted during the most recent <see cref="FinalizeBatch"/> pass.
     /// Consumed by <c>Program.cs</c> to decide the <c>--strict</c> exit code. Each warning
     /// corresponds to exactly one offending referencer file, so this is also the number of
     /// distinct referencers with violations.
     /// </summary>
     public int WarningCount { get; private set; }
+
+    /// <inheritdoc />
+    public string StrictWarningDetail =>
+        "seed file(s) contain cross-references whose target is either unpinned or missing. "
+        + "See WARN lines above for specific JSON paths.";
 
     /// <summary>
     /// NanoID-looking value detector. Generous length bounds (18-28) match
@@ -64,7 +72,7 @@ public partial class SeedCrossReferenceValidator(ILogger<SeedCrossReferenceValid
     /// <param name="documentType">Document type as classified by LayoutSync.</param>
     /// <param name="relativePath">Relative path used as the record key and in warning messages.</param>
     /// <param name="content">Wrapped seed content (identifier/type/indexes/data/@metadata). Not mutated.</param>
-    public void RecordSeed(DocumentType documentType, string relativePath, JsonObject content)
+    public void Inspect(DocumentType documentType, string relativePath, JsonObject content)
     {
         if (documentType != DocumentType.Entity)
             return;
@@ -98,7 +106,7 @@ public partial class SeedCrossReferenceValidator(ILogger<SeedCrossReferenceValid
     /// <c>@metadata.@id</c>. One aggregated WARN per offending referencer file.
     /// </summary>
     /// <returns>The number of warnings emitted (also exposed via <see cref="WarningCount"/>).</returns>
-    public int ValidateAll()
+    public int FinalizeBatch()
     {
         // Index owning seeds by their pinned declared id. Unpinned seeds are not indexed here
         // because their declared id is volatile — any match against them is a defect regardless.
