@@ -24,19 +24,28 @@ namespace LayoutSync.Services;
 /// Output: at most one <c>LogWarning</c> per offending seed file, with all flagged JSON paths
 /// aggregated into a single message.
 /// </summary>
-public partial class SeedAuthorshipValidator(ILogger<SeedAuthorshipValidator> logger)
+public partial class SeedAuthorshipValidator(ILogger<SeedAuthorshipValidator> logger) : ISeedValidator
 {
     private readonly ILogger<SeedAuthorshipValidator> _logger = logger;
 
+    /// <inheritdoc />
+    public string Name => "authorship";
+
     /// <summary>
-    /// Number of seed files that emitted at least one raw-NanoID authorship warning during
-    /// this service's lifetime. Consumed by <c>--strict</c> mode to fail the sync when any
-    /// authorship drift is present.
+    /// Number of seed files that emitted at least one raw-NanoID authorship warning during the
+    /// current batch. Consumed by <c>--strict</c> mode to fail the sync when any authorship drift
+    /// is present.
     ///
     /// One offense per file (not per field) so a file with six offending fields counts as
     /// a single authorship offense — matches the operator-facing WARN-per-file log shape.
     /// </summary>
-    public int AuthorshipWarningCount { get; private set; }
+    public int WarningCount { get; private set; }
+
+    /// <inheritdoc />
+    public string StrictWarningDetail =>
+        "seed file(s) with raw-NanoID identity references. Migrate those fields to "
+        + "`ext:{provider}:{externalId}` (see .claude/references/architecture-patterns.md, "
+        + "\"Stable Identity References\").";
 
     /// <summary>
     /// NanoID-looking value detector. Generous length bounds (18-28) accommodate historical
@@ -90,7 +99,7 @@ public partial class SeedAuthorshipValidator(ILogger<SeedAuthorshipValidator> lo
     /// <param name="documentType">Document type as classified by LayoutSync.</param>
     /// <param name="relativePath">Relative path used in the warning message.</param>
     /// <param name="content">Wrapped content (identifier/type/active/tags/indexes/data). Not mutated.</param>
-    public void Validate(DocumentType documentType, string relativePath, JsonObject content)
+    public void Inspect(DocumentType documentType, string relativePath, JsonObject content)
     {
         if (documentType != DocumentType.Entity)
             return;
@@ -127,7 +136,7 @@ public partial class SeedAuthorshipValidator(ILogger<SeedAuthorshipValidator> lo
         if (offendingPaths.Count == 0)
             return;
 
-        AuthorshipWarningCount++;
+        WarningCount++;
 
         _logger.LogWarning(
             "Seed file uses raw NanoID for identity references — consider migrating to `ext:{{provider}}:{{externalId}}`.\n"
@@ -137,6 +146,13 @@ public partial class SeedAuthorshipValidator(ILogger<SeedAuthorshipValidator> lo
             relativePath,
             string.Join(", ", offendingPaths));
     }
+
+    /// <summary>
+    /// Resets the offense counter at the start of every batch. Before this validator implemented
+    /// <see cref="ISeedValidator"/> it had no reset, so <see cref="WarningCount"/> leaked across
+    /// watch-mode re-syncs (repeated batches in one process). The uniform lifecycle closes that.
+    /// </summary>
+    public void Reset() => WarningCount = 0;
 
     /// <summary>
     /// Adds <paramref name="jsonPath"/> (or indexed variants for arrays) to

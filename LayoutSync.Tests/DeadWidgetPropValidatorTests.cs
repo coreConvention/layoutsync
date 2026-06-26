@@ -11,7 +11,7 @@ namespace LayoutSync.Tests;
 /// Unit tests for <see cref="DeadWidgetPropValidator"/>.
 ///
 /// The validator is a pure, non-blocking detector. Each test drives a small wrapped section
-/// document through <c>Validate</c> and asserts on the captured log output (a
+/// document through <c>Inspect</c> and asserts on the captured log output (a
 /// <see cref="CapturingLogger"/> collects every <c>LogWarning</c> so we can inspect count + text).
 /// The behaviour that matters most is TYPE-SCOPING: <c>defaultExpanded</c> is dead on
 /// <c>floating-panel</c> but legitimate on <c>accordion</c>, so the accordion case must stay clean.
@@ -57,13 +57,13 @@ public class DeadWidgetPropValidatorTests
             },
         });
 
-        validator.Validate(DocumentType.Section, "layouts/x/sections/trail-report-detail.json", content);
+        validator.Inspect(DocumentType.Section, "layouts/x/sections/trail-report-detail.json", content);
 
         Assert.Single(logger.Warnings);
         Assert.Contains("data.children[0].props.defaultExpanded", logger.Warnings[0]);
         Assert.Contains("floating-panel", logger.Warnings[0]);
         Assert.Contains("trail-report-detail.json", logger.Warnings[0]);
-        Assert.Equal(1, validator.DeadPropWarningCount);
+        Assert.Equal(1, validator.WarningCount);
     }
 
     // ── Case 2: floating-panel WITHOUT the dead prop → no warn ────────────────
@@ -79,10 +79,10 @@ public class DeadWidgetPropValidatorTests
             ["props"] = new JsonObject { ["title"] = "Filters", ["display"] = "floating" },
         });
 
-        validator.Validate(DocumentType.Section, "layouts/x/sections/filters.json", content);
+        validator.Inspect(DocumentType.Section, "layouts/x/sections/filters.json", content);
 
         Assert.Empty(logger.Warnings);
-        Assert.Equal(0, validator.DeadPropWarningCount);
+        Assert.Equal(0, validator.WarningCount);
     }
 
     // ── Case 3: defaultExpanded on an ACCORDION → no warn (type-scoping) ──────
@@ -100,10 +100,10 @@ public class DeadWidgetPropValidatorTests
             ["props"] = new JsonObject { ["defaultExpanded"] = new JsonArray("about") },
         });
 
-        validator.Validate(DocumentType.Section, "layouts/x/sections/group-detail-info.json", content);
+        validator.Inspect(DocumentType.Section, "layouts/x/sections/group-detail-info.json", content);
 
         Assert.Empty(logger.Warnings);
-        Assert.Equal(0, validator.DeadPropWarningCount);
+        Assert.Equal(0, validator.WarningCount);
     }
 
     // ── Case 4: non-section document types → no warn (type gate) ──────────────
@@ -124,7 +124,7 @@ public class DeadWidgetPropValidatorTests
             ["props"] = new JsonObject { ["defaultExpanded"] = true },
         });
 
-        validator.Validate(documentType, "layouts/x/sections/some.json", content);
+        validator.Inspect(documentType, "layouts/x/sections/some.json", content);
 
         Assert.Empty(logger.Warnings);
     }
@@ -158,7 +158,7 @@ public class DeadWidgetPropValidatorTests
             },
         };
 
-        validator.Validate(DocumentType.Section, "layouts/x/sections/nested.json", content);
+        validator.Inspect(DocumentType.Section, "layouts/x/sections/nested.json", content);
 
         Assert.Single(logger.Warnings);
         Assert.Contains("data.children[0].children[1].props.defaultExpanded", logger.Warnings[0]);
@@ -191,13 +191,13 @@ public class DeadWidgetPropValidatorTests
             },
         };
 
-        validator.Validate(DocumentType.Section, "layouts/x/sections/two.json", content);
+        validator.Inspect(DocumentType.Section, "layouts/x/sections/two.json", content);
 
         Assert.Single(logger.Warnings);
         Assert.Contains("data.children[0].props.defaultExpanded", logger.Warnings[0]);
         Assert.Contains("data.children[1].props.defaultExpanded", logger.Warnings[0]);
         // One file-level offense even though two props were flagged.
-        Assert.Equal(1, validator.DeadPropWarningCount);
+        Assert.Equal(1, validator.WarningCount);
     }
 
     // ── Case 7: missing / non-object data → no warn, no crash ─────────────────
@@ -209,7 +209,7 @@ public class DeadWidgetPropValidatorTests
 
         JsonObject content = new() { ["identifier"] = "empty", ["type"] = "ui-schema-section" };
 
-        validator.Validate(DocumentType.Section, "layouts/x/sections/empty.json", content);
+        validator.Inspect(DocumentType.Section, "layouts/x/sections/empty.json", content);
 
         Assert.Empty(logger.Warnings);
     }
@@ -217,14 +217,14 @@ public class DeadWidgetPropValidatorTests
     // ── Counter semantics: feeds --strict exit ────────────────────────────────
 
     [Fact]
-    public void DeadPropWarningCount_StartsAtZero()
+    public void WarningCount_StartsAtZero()
     {
         (DeadWidgetPropValidator validator, _) = CreateValidator();
-        Assert.Equal(0, validator.DeadPropWarningCount);
+        Assert.Equal(0, validator.WarningCount);
     }
 
     [Fact]
-    public void DeadPropWarningCount_AccumulatesAcrossFiles()
+    public void WarningCount_AccumulatesAcrossFiles()
     {
         (DeadWidgetPropValidator validator, _) = CreateValidator();
 
@@ -239,10 +239,10 @@ public class DeadWidgetPropValidatorTests
             ["props"] = new JsonObject { ["defaultExpanded"] = false },
         });
 
-        validator.Validate(DocumentType.Section, "layouts/x/sections/a.json", first);
-        validator.Validate(DocumentType.Section, "layouts/x/sections/b.json", second);
+        validator.Inspect(DocumentType.Section, "layouts/x/sections/a.json", first);
+        validator.Inspect(DocumentType.Section, "layouts/x/sections/b.json", second);
 
-        Assert.Equal(2, validator.DeadPropWarningCount);
+        Assert.Equal(2, validator.WarningCount);
     }
 
     [Fact]
@@ -255,11 +255,11 @@ public class DeadWidgetPropValidatorTests
             ["type"] = "floating-panel",
             ["props"] = new JsonObject { ["defaultExpanded"] = true },
         });
-        validator.Validate(DocumentType.Section, "layouts/x/sections/a.json", content);
-        Assert.Equal(1, validator.DeadPropWarningCount);
+        validator.Inspect(DocumentType.Section, "layouts/x/sections/a.json", content);
+        Assert.Equal(1, validator.WarningCount);
 
         validator.Reset();
-        Assert.Equal(0, validator.DeadPropWarningCount);
+        Assert.Equal(0, validator.WarningCount);
     }
 
     // ── Test plumbing ─────────────────────────────────────────────────────────
