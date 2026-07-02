@@ -55,26 +55,14 @@ public class DocumentSyncService(
         foreach (ISeedValidator validator in _validators)
             validator.Reset();
 
-        // Track synced identifiers per collection for orphan detection
-        // Keys must match GetCollection() output (lowercase)
-        Dictionary<string, HashSet<string>> syncedIdentifiers = new()
-        {
-            ["sections"] = [],
-            ["layouts"] = [],
-            ["menus"] = [],
-            ["modals"] = [],
-            ["manifests"] = [],
-            ["tags"] = [],
-            ["workflows"] = [],
-            ["WritePolicies"] = [],
-            ["entity-configs"] = [],
-            // Theme overrides (layout-keyed CSS variable deltas). Tracked here so
-            // orphan detection on `--clean` can prune theme entities whose source
-            // file was deleted from `layouts/{layoutId}/themes/`.
-            ["theme-definitions"] = []
-        };
+        // Track synced identifiers per collection for orphan detection. Registry-driven;
+        // an excluded collection gets no bucket, which is what "skip orphan detection"
+        // means mechanically — DetectOrphansAsync iterates these KEYS. See issue #9.
+        Dictionary<string, HashSet<string>> syncedIdentifiers =
+            BuildOrphanTracking(_cliArgs.ExcludeCollections);
 
-        IEnumerable<string> files = _fileService.DiscoverFiles(layoutsPath, layout);
+        IEnumerable<string> files = _fileService.DiscoverFiles(
+            layoutsPath, layout, _cliArgs.ExcludeCollections, _cliArgs.ExcludeLayouts);
         int fileCount = 0;
 
         foreach (string filePath in files)
@@ -335,6 +323,19 @@ public class DocumentSyncService(
                     filteredOut, collection, scopedLayoutId);
             }
 
+            // Apply --exclude-layout filter. Drops candidates attributed to an excluded layout
+            // AND (conservatively) candidates with no layoutId at all — see
+            // FilterOrphansForExcludedLayouts for why null must not survive this filter.
+            int beforeExclusion = orphans.Count;
+            orphans = FilterOrphansForExcludedLayouts(orphans, _cliArgs.ExcludeLayouts);
+            int excludedOut = beforeExclusion - orphans.Count;
+            if (excludedOut > 0)
+            {
+                _logger.LogInformation(
+                    "--exclude-layout: skipped {Count} orphan candidate(s) in {Collection} (excluded-layout documents and unattributable null-layoutId documents are never deleted while an exclusion is active)",
+                    excludedOut, collection);
+            }
+
             if (orphans.Count == 0)
                 continue;
 
@@ -408,6 +409,74 @@ public class DocumentSyncService(
     }
 
     /// <summary>
+    /// Pure decision helper: builds the orphan-tracking map — one bucket per static
+    /// collection eligible for orphan detection this run, keyed by RavenDB collection name
+    /// (<see cref="DocumentTypeExtensions.GetCollection"/> output). Registry-driven
+    /// (<see cref="CollectionFolders.Ordered"/>) so a future collection joins orphan
+    /// detection by being added there. See issue #9.
+    ///
+    /// An excluded collection gets NO bucket, so <c>DetectOrphansAsync</c> (which iterates
+    /// these keys) never queries it — orphan detection is skipped entirely, not merely
+    /// filtered. <c>entities</c>/<c>identities</c> are already excluded from tracking by
+    /// <see cref="DocumentTypeExtensions.IsStaticCollection"/> regardless of flags (user
+    /// data is never orphan-cleaned — issue #282), so excluding them here is a deliberate
+    /// no-op. <paramref name="excludeCollections"/> holds FOLDER names (the CLI vocabulary);
+    /// the folder→collection mapping is non-identity for <c>write-policies</c>→<c>WritePolicies</c>
+    /// and <c>themes</c>→<c>theme-definitions</c>.
+    /// </summary>
+    internal static Dictionary<string, HashSet<string>> BuildOrphanTracking(
+        IReadOnlyCollection<string>? excludeCollections)
+    {
+        HashSet<string> excluded = new(excludeCollections ?? [], StringComparer.OrdinalIgnoreCase);
+
+        Dictionary<string, HashSet<string>> tracking = [];
+        foreach ((string folder, DocumentType type) in CollectionFolders.Ordered)
+        {
+            if (!type.IsStaticCollection() || excluded.Contains(folder))
+                continue;
+
+            tracking[type.GetCollection()] = [];
+        }
+
+        return tracking;
+    }
+
+    /// <summary>
+    /// Pure decision helper: drop orphan candidates that may belong to an excluded layout.
+    /// Extracted as <c>internal static</c> so it can be unit-tested without RavenDB.
+    ///
+    /// <list type="bullet">
+    ///   <item><description>When <paramref name="excludedLayouts"/> is empty, all candidates pass through.</description></item>
+    ///   <item><description>Candidates whose <see cref="RavenDbService.OrphanCandidate.LayoutId"/> matches an excluded layout (Ordinal) are dropped.</description></item>
+    ///   <item><description>Candidates with a null OR EMPTY <c>LayoutId</c> are ALSO dropped while any
+    ///   exclusion is active: most static collections (sections, layouts, menus, modals, manifests,
+    ///   tags, workflows) are never stamped with <c>layoutId</c>, so such a candidate cannot be proven
+    ///   to lie OUTSIDE the excluded layout — deleting it under <c>--clean --exclude-layout X</c> could
+    ///   destroy X's own documents. Mirrors the null-drop conservatism of
+    ///   <see cref="FilterOrphansForScope"/>. Empty matters as much as null: RavenDB's dynamic
+    ///   projection surfaces a MISSING <c>layoutId</c> field as a DynamicNullObject whose
+    ///   <c>ToString()</c> is <c>""</c>, so unstamped documents reach this filter with an empty
+    ///   string, never an actual null (verified against live data during issue #9).</description></item>
+    /// </list>
+    ///
+    /// See issue #9.
+    /// </summary>
+    public static Dictionary<string, RavenDbService.OrphanCandidate> FilterOrphansForExcludedLayouts(
+        Dictionary<string, RavenDbService.OrphanCandidate> candidates,
+        IReadOnlyCollection<string> excludedLayouts)
+    {
+        if (excludedLayouts.Count == 0)
+        {
+            return candidates;
+        }
+
+        return candidates
+            .Where(kvp => !string.IsNullOrEmpty(kvp.Value.LayoutId)
+                && !excludedLayouts.Contains(kvp.Value.LayoutId, StringComparer.Ordinal))
+            .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+    }
+
+    /// <summary>
     /// Maps collection name back to DocumentType.
     /// Collection names are lowercase to match GetCollection() output.
     /// </summary>
@@ -434,7 +503,8 @@ public class DocumentSyncService(
         SyncBatchResult batch = new();
         List<SyncDocument> humanReadableIds = [];
 
-        foreach (string filePath in _fileService.DiscoverFiles(layoutsPath, layout))
+        foreach (string filePath in _fileService.DiscoverFiles(
+            layoutsPath, layout, _cliArgs.ExcludeCollections, _cliArgs.ExcludeLayouts))
         {
             if (ct.IsCancellationRequested)
                 break;
@@ -474,7 +544,8 @@ public class DocumentSyncService(
         SyncBatchResult batch = new();
         int fixedCount = 0;
 
-        foreach (string filePath in _fileService.DiscoverFiles(layoutsPath, layout))
+        foreach (string filePath in _fileService.DiscoverFiles(
+            layoutsPath, layout, _cliArgs.ExcludeCollections, _cliArgs.ExcludeLayouts))
         {
             if (ct.IsCancellationRequested)
                 break;
