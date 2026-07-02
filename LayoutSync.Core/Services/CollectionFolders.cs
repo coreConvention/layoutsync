@@ -30,6 +30,7 @@ public static class CollectionFolders
         ("tags", DocumentType.Tag),
         ("workflows", DocumentType.Workflow),
         ("write-policies", DocumentType.WritePolicy),
+        ("read-policies", DocumentType.ReadPolicy),
         ("entity-configs", DocumentType.EntityConfig),
         ("themes", DocumentType.Theme),
     ];

@@ -58,6 +58,8 @@ public class DocumentSyncService(
         // Track synced identifiers per collection for orphan detection. Registry-driven;
         // an excluded collection gets no bucket, which is what "skip orphan detection"
         // means mechanically — DetectOrphansAsync iterates these KEYS. See issue #9.
+        // (The ReadPolicies bucket this branch added by hand now comes from the
+        // read-policies entry in CollectionFolders.)
         Dictionary<string, HashSet<string>> syncedIdentifiers =
             BuildOrphanTracking(_cliArgs.ExcludeCollections);
 
@@ -147,6 +149,7 @@ public class DocumentSyncService(
         // platform-scoped flavor so those documents stay layoutId-less.
         if ((doc.DocumentType == DocumentType.Entity
              || doc.DocumentType == DocumentType.WritePolicy
+             || doc.DocumentType == DocumentType.ReadPolicy
              || doc.DocumentType == DocumentType.EntityConfig
              || doc.DocumentType == DocumentType.Theme) && !string.IsNullOrEmpty(doc.LayoutId))
         {
@@ -490,6 +493,7 @@ public class DocumentSyncService(
         "tags" => DocumentType.Tag,
         "workflows" => DocumentType.Workflow,
         "WritePolicies" => DocumentType.WritePolicy,
+        "ReadPolicies" => DocumentType.ReadPolicy,
         "entity-configs" => DocumentType.EntityConfig,
         "theme-definitions" => DocumentType.Theme,
         _ => DocumentType.Entity
@@ -679,6 +683,7 @@ public class DocumentSyncService(
         int tags = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Tag);
         int workflows = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Workflow);
         int writePolicies = batch.Results.Count(r => r.Document.DocumentType == DocumentType.WritePolicy);
+        int readPolicies = batch.Results.Count(r => r.Document.DocumentType == DocumentType.ReadPolicy);
         int entityConfigs = batch.Results.Count(r => r.Document.DocumentType == DocumentType.EntityConfig);
         int themes = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Theme);
         int entities = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Entity);
@@ -694,6 +699,7 @@ public class DocumentSyncService(
         if (tags > 0) parts.Add($"{tags} tags");
         if (workflows > 0) parts.Add($"{workflows} workflows");
         if (writePolicies > 0) parts.Add($"{writePolicies} write policies");
+        if (readPolicies > 0) parts.Add($"{readPolicies} read policies");
         if (entityConfigs > 0) parts.Add($"{entityConfigs} entity configs");
         if (themes > 0) parts.Add($"{themes} themes");
         if (entities > 0) parts.Add($"{entities} entities");

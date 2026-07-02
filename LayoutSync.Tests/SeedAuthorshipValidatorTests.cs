@@ -141,6 +141,7 @@ public class SeedAuthorshipValidatorTests
     [InlineData(DocumentType.Tag)]
     [InlineData(DocumentType.Workflow)]
     [InlineData(DocumentType.WritePolicy)]
+    [InlineData(DocumentType.ReadPolicy)]
     [InlineData(DocumentType.EntityConfig)]
     public void Validate_NonEntityDocumentTypes_DoesNotWarn(DocumentType documentType)
     {

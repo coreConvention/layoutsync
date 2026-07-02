@@ -69,6 +69,12 @@ public enum DocumentType
     WritePolicy,
 
     /// <summary>
+    /// Read policy definition from read-policies/ folder.
+    /// Pre-wrapped with type "read-policy".
+    /// </summary>
+    ReadPolicy,
+
+    /// <summary>
     /// Entity config definition from entity-configs/ folder.
     /// Pre-wrapped with type "entity-config".
     /// Layout-scoped — layoutId is injected automatically.
@@ -107,6 +113,7 @@ public static class DocumentTypeExtensions
     {
         DocumentType.Identity => "i",
         DocumentType.WritePolicy => "e", // Write policies use entity API route
+        DocumentType.ReadPolicy => "e", // Read policies use entity API route
         _ => "e" // Entity, Section, Layout, Menu, Modal all go to /api/e
     };
 
@@ -126,6 +133,7 @@ public static class DocumentTypeExtensions
         DocumentType.Tag => "tags",
         DocumentType.Workflow => "workflows",
         DocumentType.WritePolicy => "WritePolicies",
+        DocumentType.ReadPolicy => "ReadPolicies",
         DocumentType.EntityConfig => "entity-configs",
         DocumentType.Theme => "theme-definitions",
         DocumentType.Identity => "identities",
@@ -137,5 +145,5 @@ public static class DocumentTypeExtensions
     /// Returns true if the collection is safe for orphan cleanup (static data only).
     /// </summary>
     public static bool IsStaticCollection(this DocumentType type) =>
-        type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow or DocumentType.WritePolicy or DocumentType.EntityConfig or DocumentType.Theme;
+        type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow or DocumentType.WritePolicy or DocumentType.ReadPolicy or DocumentType.EntityConfig or DocumentType.Theme;
 }

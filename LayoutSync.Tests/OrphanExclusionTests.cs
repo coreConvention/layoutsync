@@ -14,15 +14,15 @@ namespace LayoutSync.Tests;
 public class OrphanExclusionTests
 {
     /// <summary>
-    /// The exact orphan-tracking keys from before the registry refactor (RavenDB
-    /// collection names — note the two non-identity folder mappings, WritePolicies and
-    /// theme-definitions). entities/identities are deliberately absent: user data is
-    /// never orphan-scanned (issue #282).
+    /// The exact orphan-tracking keys (RavenDB collection names — note the non-identity
+    /// folder mappings: WritePolicies, ReadPolicies, theme-definitions).
+    /// entities/identities are deliberately absent: user data is never orphan-scanned
+    /// (issue #282).
     /// </summary>
     private static readonly string[] HistoricalTrackingKeys =
     [
-        "layouts", "menus", "manifests", "sections", "modals",
-        "tags", "workflows", "WritePolicies", "entity-configs", "theme-definitions",
+        "layouts", "menus", "manifests", "sections", "modals", "tags",
+        "workflows", "WritePolicies", "ReadPolicies", "entity-configs", "theme-definitions",
     ];
 
     // ── BuildOrphanTracking ──────────────────────────────────────────────────
@@ -52,6 +52,7 @@ public class OrphanExclusionTests
 
     [Theory]
     [InlineData("write-policies", "WritePolicies")]
+    [InlineData("read-policies", "ReadPolicies")]
     [InlineData("themes", "theme-definitions")]
     public void BuildOrphanTracking_ExclusionByFolderName_RemovesCollectionKey(
         string excludedFolder, string absentCollection)

@@ -21,7 +21,8 @@ public class CollectionFoldersTests
     private static readonly string[] HistoricalOrder =
     [
         "layouts", "menus", "manifests", "sections", "modals", "entities",
-        "identities", "tags", "workflows", "write-policies", "entity-configs", "themes",
+        "identities", "tags", "workflows", "write-policies", "read-policies",
+        "entity-configs", "themes",
     ];
 
     [Fact]
@@ -75,11 +76,12 @@ public class CollectionFoldersTests
 
     [Theory]
     [InlineData("write-policies", "WritePolicies")]
+    [InlineData("read-policies", "ReadPolicies")]
     [InlineData("themes", "theme-definitions")]
     public void FolderToCollection_NonIdentityPairsRoundTrip(string folder, string expectedCollection)
     {
         // The CLI vocabulary is FOLDER names; orphan tracking is keyed by RavenDB
-        // COLLECTION names. These two pairs are the only non-identity mappings — pinned so
+        // COLLECTION names. These pairs are the only non-identity mappings — pinned so
         // an exclusion by folder name provably lands on the right orphan-tracking key.
         DocumentType type = CollectionFolders.ByFolder[folder];
         Assert.Equal(expectedCollection, type.GetCollection());
