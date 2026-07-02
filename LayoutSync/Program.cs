@@ -49,6 +49,16 @@ public class Program
             description: "Specific layout to watch (default: all)")
         { IsRequired = false };
 
+        Option<string[]> excludeCollectionOption = new(
+            aliases: ["--exclude-collection"],
+            description: "Collection folder to exclude from discovery, sync, and orphan detection (repeatable: --exclude-collection entities --exclude-collection identities). Validated against the known collection folders; a typo exits with code 1 and a suggestion. Sync filter only — does not protect the files from other tooling. Intended for CI. See issue #9.")
+        { IsRequired = false, Arity = ArgumentArity.ZeroOrMore };
+
+        Option<string[]> excludeLayoutOption = new(
+            aliases: ["--exclude-layout"],
+            description: "Layout directory to exclude from discovery, sync, and orphan deletion (repeatable), e.g. a test-fixture layout that must never reach a shared DB. Validated against the layout directories on disk; a typo exits with code 1 and a suggestion. Intended for CI. See issue #9.")
+        { IsRequired = false, Arity = ArgumentArity.ZeroOrMore };
+
         Option<bool> syncOnceOption = new(
             aliases: ["--sync-once"],
             description: "Sync once and exit (no watch mode)")
@@ -118,6 +128,8 @@ public class Program
             certPathOption,
             certPasswordOption,
             layoutOption,
+            excludeCollectionOption,
+            excludeLayoutOption,
             syncOnceOption,
             validateOnlyOption,
             fixIdsOption,
@@ -143,6 +155,11 @@ public class Program
                     CertificatePath = context.ParseResult.GetValueForOption(certPathOption),
                     CertificatePassword = context.ParseResult.GetValueForOption(certPasswordOption),
                     Layout = context.ParseResult.GetValueForOption(layoutOption),
+                    // `?? []`: GetValueForOption returns null (not an empty array) when a
+                    // ZeroOrMore option is absent — the POCO's `= []` initializer cannot
+                    // save us because this explicit assignment overrides it.
+                    ExcludeCollections = context.ParseResult.GetValueForOption(excludeCollectionOption) ?? [],
+                    ExcludeLayouts = context.ParseResult.GetValueForOption(excludeLayoutOption) ?? [],
                     SyncOnce = context.ParseResult.GetValueForOption(syncOnceOption),
                     ValidateOnly = context.ParseResult.GetValueForOption(validateOnlyOption),
                     FixIds = context.ParseResult.GetValueForOption(fixIdsOption),
@@ -246,8 +263,13 @@ public class Program
                     services.AddSingleton<RavenDbService>();
                     services.AddSingleton<LocalFileService>();
                     services.AddSingleton<RelativeDateResolver>();
-                    services.AddSingleton<SeedAuthorshipValidator>();
-                    services.AddSingleton<SeedCrossReferenceValidator>();
+                    // Seed validators are registered via ISeedValidator and injected into
+                    // DocumentSyncService as IEnumerable<ISeedValidator>. Registration order is
+                    // iteration order; the current three are order-independent. Adding a validator
+                    // is a single line here + one new class — nothing else changes. See issue #7.
+                    services.AddSingleton<ISeedValidator, SeedAuthorshipValidator>();
+                    services.AddSingleton<ISeedValidator, SeedCrossReferenceValidator>();
+                    services.AddSingleton<ISeedValidator, DeadWidgetPropValidator>();
                     services.AddSingleton<DocumentSyncService>();
                     services.AddSingleton<FileWatcherService>();
                 })
@@ -294,6 +316,29 @@ public class Program
 
             Log.Information("Layouts: {Path}", layoutsPath);
             Log.Information("RavenDB: {Url}/{Database}", ravenOpts.Url, ravenOpts.Database);
+
+            // --exclude-collection / --exclude-layout gate — issue #9. Validate BEFORE the
+            // guards and before any RavenDB service is resolved: a typo'd exclusion would
+            // otherwise silently sync the very data the flag was meant to protect, so it
+            // must die here with exit 1 and a "did you mean" hint.
+            IReadOnlyList<string> exclusionErrors = ExclusionValidator.Validate(
+                layoutsPath, args.ExcludeCollections, args.ExcludeLayouts, args.Layout);
+            if (exclusionErrors.Count > 0)
+            {
+                foreach (string error in exclusionErrors)
+                    Log.Error("{ExclusionError}", error);
+                return 1;
+            }
+            if (args.ExcludeCollections.Length > 0)
+                Log.Information("Excluding collection(s): {Collections}", string.Join(", ", args.ExcludeCollections));
+            if (args.ExcludeLayouts.Length > 0)
+            {
+                Log.Information("Excluding layout(s): {Layouts}", string.Join(", ", args.ExcludeLayouts));
+                if (!string.IsNullOrEmpty(args.Layout))
+                    Log.Information(
+                        "--layout '{Layout}' already scopes this run to a single layout; --exclude-layout adds nothing beyond orphan-deletion gating here.",
+                        args.Layout);
+            }
 
             // Worktree-mismatch guard — issue #520. When CWD is inside a w31rd.com
             // worktree (`.claude/worktrees/<name>/`) but the resolved layouts-path is
@@ -386,19 +431,17 @@ public class Program
             //   • duplicate entity identifiers (RavenDbService)
             //   • raw-NanoID authorship warnings (SeedAuthorshipValidator, #308)
             //   • dangling / unpinned-target cross-references (SeedCrossReferenceValidator, #300)
+            //   • dead/no-op widget props on sections (DeadWidgetPropValidator, #984)
             // Detection-only: none of these mutate state. Strict mode is the CI escalation hook.
             RavenDbService ravenService = host.Services.GetRequiredService<RavenDbService>();
-            SeedAuthorshipValidator authorshipValidator =
-                host.Services.GetRequiredService<SeedAuthorshipValidator>();
-            SeedCrossReferenceValidator crossRefValidator =
-                host.Services.GetRequiredService<SeedCrossReferenceValidator>();
+            // Same singleton instances DocumentSyncService was injected with, so their counters
+            // reflect the sync that just ran. Looping here means a future validator joins the
+            // strict gate automatically — no per-validator if-block to add. See issue #7.
+            IEnumerable<ISeedValidator> validators = host.Services.GetServices<ISeedValidator>();
 
             if (args.Strict)
             {
                 bool hasDuplicates = ravenService.DuplicateEntityIdentifierCount > 0;
-                bool hasAuthorshipWarnings = authorshipValidator.AuthorshipWarningCount > 0;
-                bool hasCrossRefViolations = crossRefValidator.WarningCount > 0;
-
                 if (hasDuplicates)
                 {
                     Log.Error(
@@ -407,23 +450,17 @@ public class Program
                     );
                 }
 
-                if (hasAuthorshipWarnings)
+                bool anyValidatorWarnings = false;
+                foreach (ISeedValidator validator in validators)
                 {
-                    Log.Error(
-                        "--strict: {Count} seed file(s) with raw-NanoID identity references. Migrate those fields to `ext:{{provider}}:{{externalId}}` (see .claude/references/architecture-patterns.md, \"Stable Identity References\").",
-                        authorshipValidator.AuthorshipWarningCount
-                    );
+                    if (validator.WarningCount > 0)
+                    {
+                        anyValidatorWarnings = true;
+                        Log.Error("--strict: {Count} {Detail}", validator.WarningCount, validator.StrictWarningDetail);
+                    }
                 }
 
-                if (hasCrossRefViolations)
-                {
-                    Log.Error(
-                        "--strict: {Count} seed file(s) contain cross-references whose target is either unpinned or missing. See WARN lines above for specific JSON paths.",
-                        crossRefValidator.WarningCount
-                    );
-                }
-
-                if (hasDuplicates || hasAuthorshipWarnings || hasCrossRefViolations)
+                if (hasDuplicates || anyValidatorWarnings)
                     return 2;
             }
 

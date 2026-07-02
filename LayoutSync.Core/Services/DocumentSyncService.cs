@@ -17,8 +17,7 @@ public class DocumentSyncService(
     LocalFileService fileService,
     RavenDbService ravenService,
     RelativeDateResolver relativeDateResolver,
-    SeedAuthorshipValidator seedAuthorshipValidator,
-    SeedCrossReferenceValidator seedCrossReferenceValidator,
+    IEnumerable<ISeedValidator> validators,
     SyncOptions options,
     CommandLineArgs cliArgs)
 {
@@ -26,8 +25,10 @@ public class DocumentSyncService(
     private readonly LocalFileService _fileService = fileService;
     private readonly RavenDbService _ravenService = ravenService;
     private readonly RelativeDateResolver _relativeDateResolver = relativeDateResolver;
-    private readonly SeedAuthorshipValidator _seedAuthorshipValidator = seedAuthorshipValidator;
-    private readonly SeedCrossReferenceValidator _seedCrossReferenceValidator = seedCrossReferenceValidator;
+    // Strategy collection: every detection-only seed validator is driven through the same
+    // Reset → Inspect (per file) → FinalizeBatch lifecycle. Adding a validator is one new class +
+    // one DI line — no edits here. See issue #7.
+    private readonly IEnumerable<ISeedValidator> _validators = validators;
     private readonly SyncOptions _options = options;
     private readonly CommandLineArgs _cliArgs = cliArgs;
 
@@ -49,31 +50,21 @@ public class DocumentSyncService(
         Stopwatch sw = Stopwatch.StartNew();
         SyncBatchResult batch = new();
 
-        // Reset accumulator state at the start of every batch so prior-batch seeds
-        // (e.g. earlier watch-mode re-syncs) don't leak into this cross-reference pass.
-        _seedCrossReferenceValidator.Reset();
+        // Reset every validator's accumulator/counter state at the start of every batch so
+        // prior-batch state (e.g. earlier watch-mode re-syncs) doesn't leak into this pass.
+        foreach (ISeedValidator validator in _validators)
+            validator.Reset();
 
-        // Track synced identifiers per collection for orphan detection
-        // Keys must match GetCollection() output (lowercase)
-        Dictionary<string, HashSet<string>> syncedIdentifiers = new()
-        {
-            ["sections"] = [],
-            ["layouts"] = [],
-            ["menus"] = [],
-            ["modals"] = [],
-            ["manifests"] = [],
-            ["tags"] = [],
-            ["workflows"] = [],
-            ["WritePolicies"] = [],
-            ["ReadPolicies"] = [],
-            ["entity-configs"] = [],
-            // Theme overrides (layout-keyed CSS variable deltas). Tracked here so
-            // orphan detection on `--clean` can prune theme entities whose source
-            // file was deleted from `layouts/{layoutId}/themes/`.
-            ["theme-definitions"] = []
-        };
+        // Track synced identifiers per collection for orphan detection. Registry-driven;
+        // an excluded collection gets no bucket, which is what "skip orphan detection"
+        // means mechanically — DetectOrphansAsync iterates these KEYS. See issue #9.
+        // (The ReadPolicies bucket this branch added by hand now comes from the
+        // read-policies entry in CollectionFolders.)
+        Dictionary<string, HashSet<string>> syncedIdentifiers =
+            BuildOrphanTracking(_cliArgs.ExcludeCollections);
 
-        IEnumerable<string> files = _fileService.DiscoverFiles(layoutsPath, layout);
+        IEnumerable<string> files = _fileService.DiscoverFiles(
+            layoutsPath, layout, _cliArgs.ExcludeCollections, _cliArgs.ExcludeLayouts);
         int fileCount = 0;
 
         foreach (string filePath in files)
@@ -100,10 +91,12 @@ public class DocumentSyncService(
         // Always detect orphans in static collections (deletion is conditional on cleanOrphans flag)
         await DetectOrphansAsync(batch, syncedIdentifiers, cleanOrphans, dryRun, ct);
 
-        // Cross-reference phase: after every file in the batch has been recorded, emit
-        // one WARN per offending referencer file where outbound NanoID refs point at
-        // a missing or unpinned owner. See issue #300.
-        _seedCrossReferenceValidator.ValidateAll();
+        // Batch-end phase: stateful, multi-phase validators run their deferred cross-check now
+        // that every file has been inspected (e.g. cross-reference emits one WARN per offending
+        // referencer whose outbound NanoID refs point at a missing/unpinned owner — issue #300).
+        // Single-phase validators inherit a no-op FinalizeBatch.
+        foreach (ISeedValidator validator in _validators)
+            validator.FinalizeBatch();
 
         sw.Stop();
         batch.TotalDuration = sw.Elapsed;
@@ -139,14 +132,12 @@ public class DocumentSyncService(
         // All JSON files should already have wrapper structure
         JsonObject contentToSync = doc.Content ?? new JsonObject();
 
-        // Non-blocking policy nudge: flag raw NanoIDs in identity-bearing fields on entity seeds
-        // so authors migrate to stable `ext:{provider}:{externalId}` refs. See issue #308.
-        _seedAuthorshipValidator.Validate(doc.DocumentType, doc.RelativePath, contentToSync);
-
-        // Record this seed for the batch-end cross-reference check. The validator accumulates
-        // (declared id, pinned-ness, outbound NanoID-shaped references) per file and emits
-        // per-referencer warnings at batch end. See issue #300.
-        _seedCrossReferenceValidator.RecordSeed(doc.DocumentType, doc.RelativePath, contentToSync);
+        // Detection-only nudge pass: every seed validator inspects this file. Each is non-blocking
+        // and pure (contentToSync is never mutated) — authorship flags raw NanoIDs in identity
+        // fields (#308), cross-reference accumulates seed metadata for the batch-end check (#300),
+        // dead-widget-prop flags no-op section props (w31rd #984). See issue #7 for the strategy.
+        foreach (ISeedValidator validator in _validators)
+            validator.Inspect(doc.DocumentType, doc.RelativePath, contentToSync);
 
         // Inject layoutId for entity documents — entities must be scoped to a layout.
         // The layoutId is derived from the layout directory name (e.g., "layouts/dirt-life/" → "dirt-life").
@@ -335,6 +326,19 @@ public class DocumentSyncService(
                     filteredOut, collection, scopedLayoutId);
             }
 
+            // Apply --exclude-layout filter. Drops candidates attributed to an excluded layout
+            // AND (conservatively) candidates with no layoutId at all — see
+            // FilterOrphansForExcludedLayouts for why null must not survive this filter.
+            int beforeExclusion = orphans.Count;
+            orphans = FilterOrphansForExcludedLayouts(orphans, _cliArgs.ExcludeLayouts);
+            int excludedOut = beforeExclusion - orphans.Count;
+            if (excludedOut > 0)
+            {
+                _logger.LogInformation(
+                    "--exclude-layout: skipped {Count} orphan candidate(s) in {Collection} (excluded-layout documents and unattributable null-layoutId documents are never deleted while an exclusion is active)",
+                    excludedOut, collection);
+            }
+
             if (orphans.Count == 0)
                 continue;
 
@@ -408,6 +412,74 @@ public class DocumentSyncService(
     }
 
     /// <summary>
+    /// Pure decision helper: builds the orphan-tracking map — one bucket per static
+    /// collection eligible for orphan detection this run, keyed by RavenDB collection name
+    /// (<see cref="DocumentTypeExtensions.GetCollection"/> output). Registry-driven
+    /// (<see cref="CollectionFolders.Ordered"/>) so a future collection joins orphan
+    /// detection by being added there. See issue #9.
+    ///
+    /// An excluded collection gets NO bucket, so <c>DetectOrphansAsync</c> (which iterates
+    /// these keys) never queries it — orphan detection is skipped entirely, not merely
+    /// filtered. <c>entities</c>/<c>identities</c> are already excluded from tracking by
+    /// <see cref="DocumentTypeExtensions.IsStaticCollection"/> regardless of flags (user
+    /// data is never orphan-cleaned — issue #282), so excluding them here is a deliberate
+    /// no-op. <paramref name="excludeCollections"/> holds FOLDER names (the CLI vocabulary);
+    /// the folder→collection mapping is non-identity for <c>write-policies</c>→<c>WritePolicies</c>
+    /// and <c>themes</c>→<c>theme-definitions</c>.
+    /// </summary>
+    internal static Dictionary<string, HashSet<string>> BuildOrphanTracking(
+        IReadOnlyCollection<string>? excludeCollections)
+    {
+        HashSet<string> excluded = new(excludeCollections ?? [], StringComparer.OrdinalIgnoreCase);
+
+        Dictionary<string, HashSet<string>> tracking = [];
+        foreach ((string folder, DocumentType type) in CollectionFolders.Ordered)
+        {
+            if (!type.IsStaticCollection() || excluded.Contains(folder))
+                continue;
+
+            tracking[type.GetCollection()] = [];
+        }
+
+        return tracking;
+    }
+
+    /// <summary>
+    /// Pure decision helper: drop orphan candidates that may belong to an excluded layout.
+    /// Extracted as <c>internal static</c> so it can be unit-tested without RavenDB.
+    ///
+    /// <list type="bullet">
+    ///   <item><description>When <paramref name="excludedLayouts"/> is empty, all candidates pass through.</description></item>
+    ///   <item><description>Candidates whose <see cref="RavenDbService.OrphanCandidate.LayoutId"/> matches an excluded layout (Ordinal) are dropped.</description></item>
+    ///   <item><description>Candidates with a null OR EMPTY <c>LayoutId</c> are ALSO dropped while any
+    ///   exclusion is active: most static collections (sections, layouts, menus, modals, manifests,
+    ///   tags, workflows) are never stamped with <c>layoutId</c>, so such a candidate cannot be proven
+    ///   to lie OUTSIDE the excluded layout — deleting it under <c>--clean --exclude-layout X</c> could
+    ///   destroy X's own documents. Mirrors the null-drop conservatism of
+    ///   <see cref="FilterOrphansForScope"/>. Empty matters as much as null: RavenDB's dynamic
+    ///   projection surfaces a MISSING <c>layoutId</c> field as a DynamicNullObject whose
+    ///   <c>ToString()</c> is <c>""</c>, so unstamped documents reach this filter with an empty
+    ///   string, never an actual null (verified against live data during issue #9).</description></item>
+    /// </list>
+    ///
+    /// See issue #9.
+    /// </summary>
+    public static Dictionary<string, RavenDbService.OrphanCandidate> FilterOrphansForExcludedLayouts(
+        Dictionary<string, RavenDbService.OrphanCandidate> candidates,
+        IReadOnlyCollection<string> excludedLayouts)
+    {
+        if (excludedLayouts.Count == 0)
+        {
+            return candidates;
+        }
+
+        return candidates
+            .Where(kvp => !string.IsNullOrEmpty(kvp.Value.LayoutId)
+                && !excludedLayouts.Contains(kvp.Value.LayoutId, StringComparer.Ordinal))
+            .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+    }
+
+    /// <summary>
     /// Maps collection name back to DocumentType.
     /// Collection names are lowercase to match GetCollection() output.
     /// </summary>
@@ -435,7 +507,8 @@ public class DocumentSyncService(
         SyncBatchResult batch = new();
         List<SyncDocument> humanReadableIds = [];
 
-        foreach (string filePath in _fileService.DiscoverFiles(layoutsPath, layout))
+        foreach (string filePath in _fileService.DiscoverFiles(
+            layoutsPath, layout, _cliArgs.ExcludeCollections, _cliArgs.ExcludeLayouts))
         {
             if (ct.IsCancellationRequested)
                 break;
@@ -475,7 +548,8 @@ public class DocumentSyncService(
         SyncBatchResult batch = new();
         int fixedCount = 0;
 
-        foreach (string filePath in _fileService.DiscoverFiles(layoutsPath, layout))
+        foreach (string filePath in _fileService.DiscoverFiles(
+            layoutsPath, layout, _cliArgs.ExcludeCollections, _cliArgs.ExcludeLayouts))
         {
             if (ct.IsCancellationRequested)
                 break;

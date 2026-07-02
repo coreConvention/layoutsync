@@ -10,8 +10,8 @@ namespace LayoutSync.Tests;
 /// <summary>
 /// Unit tests for <see cref="SeedCrossReferenceValidator"/>.
 ///
-/// The validator is a two-phase detector: <c>RecordSeed</c> accumulates per-file metadata
-/// during the normal sync pass, and <c>ValidateAll</c> runs the cross-check at batch end,
+/// The validator is a two-phase detector: <c>Inspect</c> accumulates per-file metadata
+/// during the normal sync pass, and <c>FinalizeBatch</c> runs the cross-check at batch end,
 /// emitting one <c>LogWarning</c> per offending referencer file. Tests exercise grammar
 /// (NanoID shape, <c>ext:*</c> tagged refs, empty strings), cross-reference topology
 /// (pinned / unpinned / dangling targets), and the integration-style fixture that mirrors
@@ -67,9 +67,9 @@ public class SeedCrossReferenceValidatorTests
             pinnedId: null,
             indexes: new JsonObject { ["eventId"] = NanoIdEvent });
 
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/owner.json", owner);
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
-        int warnings = validator.ValidateAll();
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/owner.json", owner);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
+        int warnings = validator.FinalizeBatch();
 
         Assert.Equal(0, warnings);
         Assert.Empty(logger.Warnings);
@@ -86,8 +86,8 @@ public class SeedCrossReferenceValidatorTests
             pinnedId: null,
             indexes: new JsonObject { ["eventId"] = NanoIdDangling });
 
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
-        int warnings = validator.ValidateAll();
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
+        int warnings = validator.FinalizeBatch();
 
         Assert.Equal(1, warnings);
         Assert.Single(logger.Warnings);
@@ -126,9 +126,9 @@ public class SeedCrossReferenceValidatorTests
             pinnedId: null,
             indexes: new JsonObject { ["eventId"] = NanoIdOther });
 
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/unpinned-owner.json", unpinnedOwner);
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
-        int warnings = validator.ValidateAll();
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/unpinned-owner.json", unpinnedOwner);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
+        int warnings = validator.FinalizeBatch();
 
         // The reference points at NanoIdOther which no seed claims → dangling.
         Assert.Equal(1, warnings);
@@ -150,9 +150,9 @@ public class SeedCrossReferenceValidatorTests
             pinnedId: null,
             data: new JsonObject { ["linkedEventId"] = NanoIdDangling });
 
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/owner.json", owner);
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
-        int warnings = validator.ValidateAll();
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/owner.json", owner);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
+        int warnings = validator.FinalizeBatch();
 
         Assert.Equal(1, warnings);
         Assert.Single(logger.Warnings);
@@ -172,8 +172,8 @@ public class SeedCrossReferenceValidatorTests
             indexes: new JsonObject { ["rootId"] = NanoIdSelf },
             data: new JsonObject { ["canonicalId"] = NanoIdSelf });
 
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/self.json", selfRef);
-        int warnings = validator.ValidateAll();
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/self.json", selfRef);
+        int warnings = validator.FinalizeBatch();
 
         Assert.Equal(0, warnings);
         Assert.Empty(logger.Warnings);
@@ -195,8 +195,8 @@ public class SeedCrossReferenceValidatorTests
             },
             data: new JsonObject { ["createdBy"] = "ext:entra:provider-subject-a" });
 
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
-        int warnings = validator.ValidateAll();
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
+        int warnings = validator.FinalizeBatch();
 
         Assert.Equal(0, warnings);
         Assert.Empty(logger.Warnings);
@@ -217,9 +217,9 @@ public class SeedCrossReferenceValidatorTests
                 ["relatedEventIds"] = new JsonArray(NanoIdEvent, NanoIdDangling, NanoIdOther)
             });
 
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/owner.json", owner);
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
-        int warnings = validator.ValidateAll();
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/owner.json", owner);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
+        int warnings = validator.FinalizeBatch();
 
         Assert.Equal(1, warnings);
         Assert.Single(logger.Warnings);
@@ -254,8 +254,8 @@ public class SeedCrossReferenceValidatorTests
             pinnedId: null,
             indexes: new JsonObject { ["eventId"] = NanoIdDangling });
 
-        validator.RecordSeed(documentType, "layouts/x/sections/some.json", content);
-        int warnings = validator.ValidateAll();
+        validator.Inspect(documentType, "layouts/x/sections/some.json", content);
+        int warnings = validator.FinalizeBatch();
 
         Assert.Equal(0, warnings);
         Assert.Empty(logger.Warnings);
@@ -280,11 +280,11 @@ public class SeedCrossReferenceValidatorTests
             pinnedId: null,
             indexes: new JsonObject { ["eventId"] = NanoIdEvent });
 
-        validator.RecordSeed(DocumentType.Entity, "layouts/tenant/entities/evt-weekend.json", eventSeed);
-        validator.RecordSeed(DocumentType.Entity, "layouts/tenant/entities/ecm-one.json", chatMsg1);
-        validator.RecordSeed(DocumentType.Entity, "layouts/tenant/entities/ecm-two.json", chatMsg2);
-        validator.RecordSeed(DocumentType.Entity, "layouts/tenant/entities/ecs-summary.json", chatSummary);
-        int warnings = validator.ValidateAll();
+        validator.Inspect(DocumentType.Entity, "layouts/tenant/entities/evt-weekend.json", eventSeed);
+        validator.Inspect(DocumentType.Entity, "layouts/tenant/entities/ecm-one.json", chatMsg1);
+        validator.Inspect(DocumentType.Entity, "layouts/tenant/entities/ecm-two.json", chatMsg2);
+        validator.Inspect(DocumentType.Entity, "layouts/tenant/entities/ecs-summary.json", chatSummary);
+        int warnings = validator.FinalizeBatch();
 
         Assert.Equal(0, warnings);
         Assert.Empty(logger.Warnings);
@@ -311,11 +311,11 @@ public class SeedCrossReferenceValidatorTests
             pinnedId: null,
             indexes: new JsonObject { ["eventId"] = NanoIdEvent });
 
-        validator.RecordSeed(DocumentType.Entity, "layouts/tenant/entities/evt-weekend.json", eventSeed);
-        validator.RecordSeed(DocumentType.Entity, "layouts/tenant/entities/ecm-one.json", chatMsg1);
-        validator.RecordSeed(DocumentType.Entity, "layouts/tenant/entities/ecm-two.json", chatMsg2);
-        validator.RecordSeed(DocumentType.Entity, "layouts/tenant/entities/ecs-summary.json", chatSummary);
-        int warnings = validator.ValidateAll();
+        validator.Inspect(DocumentType.Entity, "layouts/tenant/entities/evt-weekend.json", eventSeed);
+        validator.Inspect(DocumentType.Entity, "layouts/tenant/entities/ecm-one.json", chatMsg1);
+        validator.Inspect(DocumentType.Entity, "layouts/tenant/entities/ecm-two.json", chatMsg2);
+        validator.Inspect(DocumentType.Entity, "layouts/tenant/entities/ecs-summary.json", chatSummary);
+        int warnings = validator.FinalizeBatch();
 
         Assert.Equal(3, warnings);
         Assert.Equal(3, logger.Warnings.Count);
@@ -347,8 +347,8 @@ public class SeedCrossReferenceValidatorTests
                 ["count"] = 15
             });
 
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
-        int warnings = validator.ValidateAll();
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/ref.json", referencer);
+        int warnings = validator.FinalizeBatch();
 
         Assert.Equal(0, warnings);
         Assert.Empty(logger.Warnings);
@@ -365,8 +365,8 @@ public class SeedCrossReferenceValidatorTests
             pinnedId: null,
             indexes: new JsonObject { ["eventId"] = NanoIdDangling });
 
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/ref.json", dangling);
-        int first = validator.ValidateAll();
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/ref.json", dangling);
+        int first = validator.FinalizeBatch();
         Assert.Equal(1, first);
 
         validator.Reset();
@@ -379,9 +379,9 @@ public class SeedCrossReferenceValidatorTests
             pinnedId: null,
             indexes: new JsonObject { ["eventId"] = NanoIdEvent });
 
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/owner.json", owner);
-        validator.RecordSeed(DocumentType.Entity, "layouts/x/entities/ref.json", benign);
-        int second = validator.ValidateAll();
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/owner.json", owner);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/ref.json", benign);
+        int second = validator.FinalizeBatch();
 
         Assert.Equal(0, second);
         Assert.Equal(0, validator.WarningCount);

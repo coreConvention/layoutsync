@@ -134,14 +134,29 @@ public class LocalFileService(ILogger<LocalFileService> logger)
     /// catalogue, available to every tenant). Platform-scoped discovery is
     /// SKIPPED when <paramref name="specificLayout"/> is set — a tenant-scoped
     /// sync should not touch the platform catalogue.
+    /// Collection folders are enumerated from <see cref="CollectionFolders.Ordered"/>
+    /// (single source of truth; see issue #9).
     /// </summary>
-    public IEnumerable<string> DiscoverFiles(string layoutsPath, string? specificLayout = null)
+    /// <param name="layoutsPath">Path to the layouts root.</param>
+    /// <param name="specificLayout">Optional single layout to scan (<c>--layout</c>).</param>
+    /// <param name="excludeCollections">Collection folder names to skip (<c>--exclude-collection</c>,
+    /// case-insensitive). <c>themes</c> also skips the platform sibling catalogue.</param>
+    /// <param name="excludeLayouts">Layout directory names to skip entirely
+    /// (<c>--exclude-layout</c>, case-sensitive — Linux CI filesystems are).</param>
+    public IEnumerable<string> DiscoverFiles(
+        string layoutsPath,
+        string? specificLayout = null,
+        IReadOnlyCollection<string>? excludeCollections = null,
+        IReadOnlyCollection<string>? excludeLayouts = null)
     {
         if (!Directory.Exists(layoutsPath))
         {
             _logger.LogWarning("Layouts directory not found: {Path}", layoutsPath);
             yield break;
         }
+
+        HashSet<string> excludedCollections = new(excludeCollections ?? [], StringComparer.OrdinalIgnoreCase);
+        HashSet<string> excludedLayouts = new(excludeLayouts ?? [], StringComparer.Ordinal);
 
         // If a specific layout is requested, only scan that directory
         IEnumerable<string> layoutDirs;
@@ -162,68 +177,29 @@ public class LocalFileService(ILogger<LocalFileService> logger)
 
         foreach (string layoutDir in layoutDirs)
         {
-            // Layouts folder (collection-based structure)
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "layouts")))
-                yield return file;
+            if (excludedLayouts.Contains(Path.GetFileName(layoutDir)))
+            {
+                _logger.LogDebug("Skipping excluded layout: {Layout}", Path.GetFileName(layoutDir));
+                continue;
+            }
 
-            // Menus folder (collection-based structure)
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "menus")))
-                yield return file;
+            foreach ((string folder, _) in CollectionFolders.Ordered)
+            {
+                if (excludedCollections.Contains(folder))
+                    continue;
 
-            // Manifests folder (collection-based structure)
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "manifests")))
-                yield return file;
-
-            // Sections folder
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "sections")))
-                yield return file;
-
-            // Modals folder
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "modals")))
-                yield return file;
-
-            // Entities folder
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "entities")))
-                yield return file;
-
-            // Identities folder
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "identities")))
-                yield return file;
-
-            // Tags folder
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "tags")))
-                yield return file;
-
-            // Workflows folder
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "workflows")))
-                yield return file;
-
-            // Write policies folder
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "write-policies")))
-                yield return file;
-
-            // Read policies folder
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "read-policies")))
-                yield return file;
-
-            // Entity configs folder
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "entity-configs")))
-                yield return file;
-
-            // Themes folder — layout-keyed CSS variable overrides
-            // (`layouts/{layoutId}/themes/*.json`). Each entity carries the
-            // override theme JSON in its `data` block; LayoutSync stamps the
-            // entity envelope's layoutId from the directory name so the API
-            // resolver can match it against the request tenant context.
-            foreach (string file in GetJsonFiles(Path.Combine(layoutDir, "themes")))
-                yield return file;
+                foreach (string file in GetJsonFiles(Path.Combine(layoutDir, folder)))
+                    yield return file;
+            }
         }
 
         // Platform theme catalogue — `<layoutsParent>/themes/*.json` (sibling to
         // the layouts root). These are platform-scoped: no layoutId, available
         // to every tenant. Skipped under `--layout` because a tenant-scoped run
-        // should not redundantly re-sync the catalogue on every iteration.
-        if (string.IsNullOrEmpty(specificLayout))
+        // should not redundantly re-sync the catalogue on every iteration, and
+        // under `--exclude-collection themes` because excluding the collection
+        // means excluding it in BOTH of its scopes (layout-keyed + platform).
+        if (string.IsNullOrEmpty(specificLayout) && !excludedCollections.Contains("themes"))
         {
             string platformThemesPath = GetPlatformThemesDirectory(layoutsPath);
             foreach (string file in GetJsonFiles(platformThemesPath))
@@ -261,32 +237,17 @@ public class LocalFileService(ILogger<LocalFileService> logger)
     /// <summary>
     /// Determines the document type based on the file path.
     /// Files are organized in collection-based folders: layouts/, menus/, manifests/, sections/, etc.
+    /// Folder→type mapping lives in <see cref="CollectionFolders.ByFolder"/> (case-insensitive);
+    /// unknown folders default to <see cref="DocumentType.Entity"/> (historical behavior).
     /// </summary>
     public static DocumentType DetermineDocumentType(string relativePath)
     {
         string[] parts = relativePath.Split('/');
 
         // Check folder-based types (collection-based structure)
-        if (parts.Length >= 2)
+        if (parts.Length >= 2 && CollectionFolders.ByFolder.TryGetValue(parts[1], out DocumentType type))
         {
-            string folder = parts[1].ToLowerInvariant();
-            return folder switch
-            {
-                "layouts" => DocumentType.Layout,
-                "menus" => DocumentType.Menu,
-                "manifests" => DocumentType.Manifest,
-                "sections" => DocumentType.Section,
-                "modals" => DocumentType.Modal,
-                "entities" => DocumentType.Entity,
-                "identities" => DocumentType.Identity,
-                "tags" => DocumentType.Tag,
-                "workflows" => DocumentType.Workflow,
-                "write-policies" => DocumentType.WritePolicy,
-                "read-policies" => DocumentType.ReadPolicy,
-                "entity-configs" => DocumentType.EntityConfig,
-                "themes" => DocumentType.Theme,
-                _ => DocumentType.Entity // Default to entity
-            };
+            return type;
         }
 
         return DocumentType.Entity;

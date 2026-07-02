@@ -11,7 +11,7 @@ namespace LayoutSync.Tests;
 /// Unit tests for <see cref="SeedAuthorshipValidator"/>.
 ///
 /// The validator is a pure, non-blocking policy nudge. Each test drives a small wrapped document
-/// through <c>Validate</c> and asserts on the captured log output (a <see cref="CapturingLogger"/>
+/// through <c>Inspect</c> and asserts on the captured log output (a <see cref="CapturingLogger"/>
 /// collects every <c>LogWarning</c> so we can inspect count + message text). No tenant-literal
 /// identifiers or provider OIDs appear in these tests — all sample NanoIDs and ext-refs are
 /// synthetic grammar exemplars.
@@ -49,7 +49,7 @@ public class SeedAuthorshipValidatorTests
             }
         };
 
-        validator.Validate(DocumentType.Entity, "layouts/x/entities/grp-a.json", content);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/grp-a.json", content);
 
         Assert.Single(logger.Warnings);
         Assert.Contains("indexes.adminIds[0]", logger.Warnings[0]);
@@ -71,7 +71,7 @@ public class SeedAuthorshipValidatorTests
             }
         };
 
-        validator.Validate(DocumentType.Entity, "layouts/x/entities/grp-a.json", content);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/grp-a.json", content);
 
         Assert.Empty(logger.Warnings);
     }
@@ -91,7 +91,7 @@ public class SeedAuthorshipValidatorTests
             }
         };
 
-        validator.Validate(DocumentType.Entity, "layouts/x/entities/grp-a.json", content);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/grp-a.json", content);
 
         Assert.Single(logger.Warnings);
         string message = logger.Warnings[0];
@@ -124,7 +124,7 @@ public class SeedAuthorshipValidatorTests
             }
         };
 
-        validator.Validate(DocumentType.Entity, "layouts/x/entities/plain.json", content);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/plain.json", content);
 
         Assert.Empty(logger.Warnings);
     }
@@ -157,7 +157,7 @@ public class SeedAuthorshipValidatorTests
             }
         };
 
-        validator.Validate(documentType, "layouts/x/sections/some.json", content);
+        validator.Inspect(documentType, "layouts/x/sections/some.json", content);
 
         Assert.Empty(logger.Warnings);
     }
@@ -181,7 +181,7 @@ public class SeedAuthorshipValidatorTests
             }
         };
 
-        validator.Validate(DocumentType.Entity, "layouts/x/entities/grp-family.json", content);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/grp-family.json", content);
 
         Assert.Single(logger.Warnings);
         string message = logger.Warnings[0];
@@ -214,7 +214,7 @@ public class SeedAuthorshipValidatorTests
             }
         };
 
-        validator.Validate(DocumentType.Entity, "layouts/x/entities/grp.json", content);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/grp.json", content);
 
         Assert.Single(logger.Warnings);
         string message = logger.Warnings[0];
@@ -240,7 +240,7 @@ public class SeedAuthorshipValidatorTests
             }
         };
 
-        validator.Validate(DocumentType.Entity, "layouts/x/entities/thing.json", content);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/thing.json", content);
 
         Assert.Single(logger.Warnings);
         Assert.Contains("data.ownerId", logger.Warnings[0]);
@@ -265,25 +265,25 @@ public class SeedAuthorshipValidatorTests
             }
         };
 
-        validator.Validate(DocumentType.Entity, "layouts/x/entities/thing.json", content);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/thing.json", content);
 
         Assert.Empty(logger.Warnings);
     }
 
-    // ── Counter: AuthorshipWarningCount feeds --strict exit ──────────────────
+    // ── Counter: WarningCount feeds --strict exit ──────────────────
 
     [Fact]
-    public void AuthorshipWarningCount_StartsAtZero()
+    public void WarningCount_StartsAtZero()
     {
         // Guards the --strict wiring: a fresh validator must report zero offenses so a
         // clean sync never trips the strict gate.
         (SeedAuthorshipValidator validator, _) = CreateValidator();
 
-        Assert.Equal(0, validator.AuthorshipWarningCount);
+        Assert.Equal(0, validator.WarningCount);
     }
 
     [Fact]
-    public void AuthorshipWarningCount_IncrementsOncePerOffendingFile()
+    public void WarningCount_IncrementsOncePerOffendingFile()
     {
         // One WARN line is emitted per file (not per offending field). The counter must
         // mirror that so operators see consistent numbers between logs and strict exit.
@@ -299,14 +299,14 @@ public class SeedAuthorshipValidatorTests
             }
         };
 
-        validator.Validate(DocumentType.Entity, "layouts/x/entities/a.json", content);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/a.json", content);
 
         Assert.Single(logger.Warnings);
-        Assert.Equal(1, validator.AuthorshipWarningCount);
+        Assert.Equal(1, validator.WarningCount);
     }
 
     [Fact]
-    public void AuthorshipWarningCount_AccumulatesAcrossFiles()
+    public void WarningCount_AccumulatesAcrossFiles()
     {
         // Multiple offending files bump the counter cumulatively — feeds the --strict
         // summary at process exit ("--strict: N seed file(s) with raw-NanoID ...").
@@ -321,14 +321,14 @@ public class SeedAuthorshipValidatorTests
             ["indexes"] = new JsonObject { ["ownerId"] = NanoIdB }
         };
 
-        validator.Validate(DocumentType.Entity, "layouts/x/entities/a.json", first);
-        validator.Validate(DocumentType.Entity, "layouts/x/entities/b.json", second);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/a.json", first);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/b.json", second);
 
-        Assert.Equal(2, validator.AuthorshipWarningCount);
+        Assert.Equal(2, validator.WarningCount);
     }
 
     [Fact]
-    public void AuthorshipWarningCount_DoesNotIncrementForCleanFiles()
+    public void WarningCount_DoesNotIncrementForCleanFiles()
     {
         // ext:*-only and non-entity files must not increment the counter, otherwise the
         // strict gate would fire against well-formed seeds.
@@ -343,11 +343,30 @@ public class SeedAuthorshipValidatorTests
             ["indexes"] = new JsonObject { ["ownerId"] = NanoIdA }
         };
 
-        validator.Validate(DocumentType.Entity, "layouts/x/entities/clean.json", cleanEntity);
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/clean.json", cleanEntity);
         // Section documents are skipped entirely.
-        validator.Validate(DocumentType.Section, "layouts/x/sections/s.json", nonEntity);
+        validator.Inspect(DocumentType.Section, "layouts/x/sections/s.json", nonEntity);
 
-        Assert.Equal(0, validator.AuthorshipWarningCount);
+        Assert.Equal(0, validator.WarningCount);
+    }
+
+    [Fact]
+    public void Reset_ZeroesTheCounter()
+    {
+        // Before this validator implemented ISeedValidator it had NO Reset(), so WarningCount
+        // leaked across watch-mode batches (repeated SyncAllAsync in one process). The uniform
+        // lifecycle now resets it at batch start — this guards that fix. See issue #7.
+        (SeedAuthorshipValidator validator, _) = CreateValidator();
+
+        JsonObject content = new()
+        {
+            ["indexes"] = new JsonObject { ["ownerId"] = NanoIdA }
+        };
+        validator.Inspect(DocumentType.Entity, "layouts/x/entities/a.json", content);
+        Assert.Equal(1, validator.WarningCount);
+
+        validator.Reset();
+        Assert.Equal(0, validator.WarningCount);
     }
 
     // ── Test plumbing ─────────────────────────────────────────────────────────

@@ -3,3 +3,8 @@ obj/
 release/
 *.user
 .vs/
+
+# Claude Code local-machine state (per-repo permission allowlist auto-written by the CLI).
+# Keep .claude/prompts/ etc. tracked — only the local-only settings file is excluded.
+.claude/settings.local.json
+
