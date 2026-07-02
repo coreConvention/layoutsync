@@ -14,12 +14,14 @@ public class FileWatcherService(
     ILogger<FileWatcherService> logger,
     DocumentSyncService syncService,
     LocalFileService fileService,
-    SyncOptions options)
+    SyncOptions options,
+    CommandLineArgs cliArgs)
 {
     private readonly ILogger<FileWatcherService> _logger = logger;
     private readonly DocumentSyncService _syncService = syncService;
     private readonly LocalFileService _fileService = fileService;
     private readonly SyncOptions _options = options;
+    private readonly CommandLineArgs _cliArgs = cliArgs;
     private readonly ConcurrentDictionary<string, DateTime> _pendingFiles = new();
     private readonly ConcurrentDictionary<string, DateTime> _pendingDeletions = new();
     private readonly ConcurrentDictionary<string, TrackedFile> _trackedFiles = new(StringComparer.OrdinalIgnoreCase);
@@ -134,6 +136,12 @@ public class FileWatcherService(
         if (e.Name?.StartsWith('.') == true || e.Name?.Contains('~') == true)
             return;
 
+        if (IsExcluded(e.FullPath))
+        {
+            _logger.LogDebug("Skipping excluded path: {Path}", e.FullPath);
+            return;
+        }
+
         _logger.LogDebug("File changed: {Path}", e.FullPath);
         QueueFileForSync(e.FullPath);
     }
@@ -145,10 +153,22 @@ public class FileWatcherService(
 
         _logger.LogDebug("File renamed: {OldPath} -> {NewPath}", e.OldFullPath, e.FullPath);
 
-        // Remove tracking for old path (treat as deletion)
+        // Remove tracking for old path (treat as deletion). Judged per-side, not
+        // per-event: an included→excluded move must still delete the old DB doc
+        // (its synced source just left the included space), which the tracking
+        // invariant handles — files inside excluded dirs are never tracked, so
+        // an excluded OLD path simply misses here. See issue #9.
         if (_trackedFiles.TryRemove(e.OldFullPath, out TrackedFile? oldTracked))
         {
             QueueFileForDeletion(e.OldFullPath, oldTracked);
+        }
+
+        // Sync side judged by the NEW path: excluded→included moves must sync,
+        // included→excluded moves must not.
+        if (IsExcluded(e.FullPath))
+        {
+            _logger.LogDebug("Skipping excluded rename target: {Path}", e.FullPath);
+            return;
         }
 
         // Queue new path for sync (will create new tracking entry)
@@ -163,6 +183,15 @@ public class FileWatcherService(
         // Skip temp files and backups
         if (e.Name?.StartsWith('.') == true || e.Name?.Contains('~') == true)
             return;
+
+        // Guard BEFORE the untracked-deletion fallback below: DeriveTrackingFromPath
+        // would otherwise happily produce a deletion candidate for a file inside an
+        // excluded directory. See issue #9.
+        if (IsExcluded(e.FullPath))
+        {
+            _logger.LogDebug("Skipping excluded path deletion: {Path}", e.FullPath);
+            return;
+        }
 
         _logger.LogInformation("File deleted: {Path}", e.FullPath);
 
@@ -185,6 +214,43 @@ public class FileWatcherService(
                 _logger.LogWarning("Cannot determine document info for deleted file: {Path}", e.FullPath);
             }
         }
+    }
+
+    /// <summary>
+    /// Instance wrapper over <see cref="IsExcludedPath"/> bound to this watcher's
+    /// layouts root and the run's CLI exclusions.
+    /// </summary>
+    private bool IsExcluded(string fullPath) =>
+        IsExcludedPath(_layoutsPath, fullPath, _cliArgs.ExcludeCollections, _cliArgs.ExcludeLayouts);
+
+    /// <summary>
+    /// Pure decision helper: does <paramref name="fullPath"/> fall inside an excluded
+    /// layout directory or an excluded collection folder? Extracted as
+    /// <c>internal static</c> so it can be unit-tested without a live watcher.
+    ///
+    /// Separators are normalized (<c>\</c>→<c>/</c>) BEFORE splitting — FileSystemWatcher
+    /// hands back OS-native paths, and on Windows <c>Path.GetRelativePath</c> yields
+    /// backslashes that a <c>'/'</c>-split would treat as one giant segment.
+    /// Segment 0 is the layout directory (Ordinal — Linux CI is case-sensitive);
+    /// segment 1 is the collection folder (OrdinalIgnoreCase, mirroring
+    /// <see cref="LocalFileService.DetermineDocumentType"/>). See issue #9.
+    /// </summary>
+    internal static bool IsExcludedPath(
+        string layoutsPath,
+        string fullPath,
+        IReadOnlyCollection<string> excludeCollections,
+        IReadOnlyCollection<string> excludeLayouts)
+    {
+        if (excludeCollections.Count == 0 && excludeLayouts.Count == 0)
+            return false;
+
+        string relativePath = Path.GetRelativePath(layoutsPath, fullPath).Replace('\\', '/');
+        string[] parts = relativePath.Split('/');
+
+        if (parts.Length > 0 && excludeLayouts.Contains(parts[0], StringComparer.Ordinal))
+            return true;
+
+        return parts.Length > 1 && excludeCollections.Contains(parts[1], StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>

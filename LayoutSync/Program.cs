@@ -49,6 +49,16 @@ public class Program
             description: "Specific layout to watch (default: all)")
         { IsRequired = false };
 
+        Option<string[]> excludeCollectionOption = new(
+            aliases: ["--exclude-collection"],
+            description: "Collection folder to exclude from discovery, sync, and orphan detection (repeatable: --exclude-collection entities --exclude-collection identities). Validated against the known collection folders; a typo exits with code 1 and a suggestion. Sync filter only — does not protect the files from other tooling. Intended for CI. See issue #9.")
+        { IsRequired = false, Arity = ArgumentArity.ZeroOrMore };
+
+        Option<string[]> excludeLayoutOption = new(
+            aliases: ["--exclude-layout"],
+            description: "Layout directory to exclude from discovery, sync, and orphan deletion (repeatable), e.g. a test-fixture layout that must never reach a shared DB. Validated against the layout directories on disk; a typo exits with code 1 and a suggestion. Intended for CI. See issue #9.")
+        { IsRequired = false, Arity = ArgumentArity.ZeroOrMore };
+
         Option<bool> syncOnceOption = new(
             aliases: ["--sync-once"],
             description: "Sync once and exit (no watch mode)")
@@ -118,6 +128,8 @@ public class Program
             certPathOption,
             certPasswordOption,
             layoutOption,
+            excludeCollectionOption,
+            excludeLayoutOption,
             syncOnceOption,
             validateOnlyOption,
             fixIdsOption,
@@ -143,6 +155,11 @@ public class Program
                     CertificatePath = context.ParseResult.GetValueForOption(certPathOption),
                     CertificatePassword = context.ParseResult.GetValueForOption(certPasswordOption),
                     Layout = context.ParseResult.GetValueForOption(layoutOption),
+                    // `?? []`: GetValueForOption returns null (not an empty array) when a
+                    // ZeroOrMore option is absent — the POCO's `= []` initializer cannot
+                    // save us because this explicit assignment overrides it.
+                    ExcludeCollections = context.ParseResult.GetValueForOption(excludeCollectionOption) ?? [],
+                    ExcludeLayouts = context.ParseResult.GetValueForOption(excludeLayoutOption) ?? [],
                     SyncOnce = context.ParseResult.GetValueForOption(syncOnceOption),
                     ValidateOnly = context.ParseResult.GetValueForOption(validateOnlyOption),
                     FixIds = context.ParseResult.GetValueForOption(fixIdsOption),
@@ -299,6 +316,29 @@ public class Program
 
             Log.Information("Layouts: {Path}", layoutsPath);
             Log.Information("RavenDB: {Url}/{Database}", ravenOpts.Url, ravenOpts.Database);
+
+            // --exclude-collection / --exclude-layout gate — issue #9. Validate BEFORE the
+            // guards and before any RavenDB service is resolved: a typo'd exclusion would
+            // otherwise silently sync the very data the flag was meant to protect, so it
+            // must die here with exit 1 and a "did you mean" hint.
+            IReadOnlyList<string> exclusionErrors = ExclusionValidator.Validate(
+                layoutsPath, args.ExcludeCollections, args.ExcludeLayouts, args.Layout);
+            if (exclusionErrors.Count > 0)
+            {
+                foreach (string error in exclusionErrors)
+                    Log.Error("{ExclusionError}", error);
+                return 1;
+            }
+            if (args.ExcludeCollections.Length > 0)
+                Log.Information("Excluding collection(s): {Collections}", string.Join(", ", args.ExcludeCollections));
+            if (args.ExcludeLayouts.Length > 0)
+            {
+                Log.Information("Excluding layout(s): {Layouts}", string.Join(", ", args.ExcludeLayouts));
+                if (!string.IsNullOrEmpty(args.Layout))
+                    Log.Information(
+                        "--layout '{Layout}' already scopes this run to a single layout; --exclude-layout adds nothing beyond orphan-deletion gating here.",
+                        args.Layout);
+            }
 
             // Worktree-mismatch guard — issue #520. When CWD is inside a w31rd.com
             // worktree (`.claude/worktrees/<name>/`) but the resolved layouts-path is
