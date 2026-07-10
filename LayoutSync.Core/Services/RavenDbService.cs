@@ -417,23 +417,38 @@ public class RavenDbService : IDisposable
   }
 
   /// <summary>
-  /// Information about a candidate orphan returned by <see cref="GetAllIdentifiersAsync"/>.
-  /// <see cref="LayoutId"/> is null when the document does not stamp a <c>layoutId</c> field
+  /// Information about a candidate orphan returned by <see cref="GetAllOrphanCandidatesAsync"/>.
+  /// <see cref="LayoutId"/> is empty when the document does not stamp a <c>layoutId</c> field
   /// (true for sections / layouts / menus / modals / manifests / tags / workflows). Layout-scoped
   /// collections (WritePolicies, ReadPolicies, entity-configs, theme-definitions) populate it. Used by
   /// orphan-scope filtering to keep <c>--clean</c> + <c>--layout</c> combos safe across tenants.
   /// See issue #427.
   /// </summary>
-  public sealed record OrphanCandidate(string DocumentId, string? LayoutId);
+  /// <remarks>
+  /// RavenDB's dynamic projection surfaces a MISSING <c>layoutId</c> as the empty string, never
+  /// C# null (issue #13) — treat null and "" identically for attribution. <see cref="Identifier"/>
+  /// is a trailing parameter (default "") only so pre-existing 2-arg constructions still compile;
+  /// <see cref="GetAllOrphanCandidatesAsync"/> always populates it. Orphan detection keys on
+  /// (<see cref="LayoutId"/>, <see cref="Identifier"/>) because two layouts may legitimately ship
+  /// the same identifier in one collection (issue #17).
+  /// </remarks>
+  public sealed record OrphanCandidate(string DocumentId, string? LayoutId, string Identifier = "");
 
   /// <summary>
-  /// Gets all identifiers from a specific collection plus their stamped <c>layoutId</c>
-  /// (when present). Used for orphan detection in static collections.
+  /// Gets every document in a static collection as an <see cref="OrphanCandidate"/>
+  /// (identifier + stamped <c>layoutId</c>), keyed by its unique RavenDB document id.
+  /// Used for orphan detection in static collections.
   /// </summary>
+  /// <remarks>
+  /// Keyed by DOCUMENT ID, not identifier: two layouts may ship the same identifier in one
+  /// collection (issue #17), and keying by identifier would silently collapse them to one
+  /// entry — hiding one physical document from orphan detection entirely. The document id is
+  /// unique, so every document is represented; callers match by (layoutId, identifier).
+  /// </remarks>
   /// <param name="collection">The RavenDB collection name (e.g., "Sections").</param>
   /// <param name="ct">Cancellation token.</param>
-  /// <returns>Dictionary mapping identifier to <see cref="OrphanCandidate"/> (document id + optional layoutId).</returns>
-  public async Task<Dictionary<string, OrphanCandidate>> GetAllIdentifiersAsync(
+  /// <returns>Dictionary mapping document id to its <see cref="OrphanCandidate"/>.</returns>
+  public async Task<Dictionary<string, OrphanCandidate>> GetAllOrphanCandidatesAsync(
     string collection,
     CancellationToken ct = default
   )
@@ -444,8 +459,9 @@ public class RavenDbService : IDisposable
     try
     {
       // Project identifier, document id, and (optional) layoutId so callers can scope
-      // orphan detection by tenant. Documents without a layoutId field return null
-      // — the projection succeeds rather than throwing for missing fields.
+      // orphan detection by tenant. Documents without a layoutId field return the empty
+      // string (RavenDB dynamic projection, issue #13), not null — the projection succeeds
+      // rather than throwing for missing fields.
       string query = $"from {collection} select identifier, id(), layoutId";
       IAsyncRawDocumentQuery<dynamic> results = session.Advanced.AsyncRawQuery<dynamic>(query);
       List<dynamic> documents = await results.ToListAsync(ct);
@@ -458,7 +474,7 @@ public class RavenDbService : IDisposable
 
         if (!string.IsNullOrEmpty(identifier) && !string.IsNullOrEmpty(docId))
         {
-          result[identifier] = new OrphanCandidate(docId, layoutId);
+          result[docId] = new OrphanCandidate(docId, layoutId, identifier);
         }
       }
 
