@@ -1,0 +1,34 @@
+# CI
+#
+# Build + test gate on PRs and pushes to main. The repo had no CI before #10;
+# this keeps main releasable so tag-triggered releases (release.yml) always
+# publish from a known-green tree.
+#
+# Issue: #10
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build + test
+        # dotnet test builds the whole solution first, so this covers both.
+        # No -warnaserror — main carries a known pre-existing SYSLIB0057 cert-API warning.
+        run: dotnet test LayoutSync.sln -c Release
