@@ -147,11 +147,24 @@ public class RavenDbService : IDisposable
       // with the same Identifier in the DB (see issue #282). Entity orphan cleanup is
       // intentionally disabled to protect user data, so we CANNOT auto-delete extras —
       // but we must at least detect and warn so these ghosts do not persist silently.
-      string query = $"from {collection} where identifier = $lookupValue";
+      //
+      // Scope the lookup by layoutId for per-tenant document types (those that stamp a
+      // layoutId field — see DocumentType.StampsLayoutId). Without this, two layouts that
+      // declare documents with the SAME identifier in the SAME collection clobber each other
+      // on a shared-DB sync: the second layout's sync finds the first's document by identifier
+      // alone and replaces it in place (flipping its layoutId and content). Layout-agnostic
+      // documents (sections, manifests, platform themes, …) carry no layoutId field and are
+      // matched by identifier alone, exactly as before. See issue #16.
+      bool scopeByLayoutId = doc.DocumentType.StampsLayoutId() && !string.IsNullOrEmpty(doc.LayoutId);
+      string query = BuildEntityLookupQuery(collection, scopeByLayoutId);
 
       IAsyncRawDocumentQuery<object> results = session
         .Advanced.AsyncRawQuery<object>(query)
         .AddParameter("lookupValue", lookupValue);
+      if (scopeByLayoutId)
+      {
+        results = results.AddParameter("layoutId", doc.LayoutId!);
+      }
 
       List<object> documents = await results.ToListAsync(ct);
 
@@ -201,6 +214,20 @@ public class RavenDbService : IDisposable
       return (null, null);
     }
   }
+
+  /// <summary>
+  /// Pure helper: builds the RavenDB RQL used by <see cref="FindDocumentAsync"/> to locate a
+  /// non-identity document by its <c>identifier</c>. When <paramref name="scopeByLayoutId"/> is
+  /// true the query is additionally constrained by <c>layoutId</c> (the caller binds the
+  /// <c>$layoutId</c> parameter) so per-tenant documents that legitimately share an identifier
+  /// across layouts don't collide on a shared-DB sync. Extracted as <c>public static</c> — like
+  /// <see cref="ResolveEntityLookup"/> — so the scoping decision is unit-testable without a live
+  /// RavenDB session. See issue #16.
+  /// </summary>
+  public static string BuildEntityLookupQuery(string collection, bool scopeByLayoutId) =>
+    scopeByLayoutId
+      ? $"from {collection} where identifier = $lookupValue and layoutId = $layoutId"
+      : $"from {collection} where identifier = $lookupValue";
 
   /// <summary>
   /// Result of <see cref="ResolveEntityLookup"/>: the first document (used as today) plus

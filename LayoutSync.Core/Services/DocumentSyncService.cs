@@ -147,11 +147,7 @@ public class DocumentSyncService(
         // request tenant context) and the platform catalogue (LayoutId null/empty, available to
         // every tenant via /api/init). The null-guard below short-circuits stamping for the
         // platform-scoped flavor so those documents stay layoutId-less.
-        if ((doc.DocumentType == DocumentType.Entity
-             || doc.DocumentType == DocumentType.WritePolicy
-             || doc.DocumentType == DocumentType.ReadPolicy
-             || doc.DocumentType == DocumentType.EntityConfig
-             || doc.DocumentType == DocumentType.Theme) && !string.IsNullOrEmpty(doc.LayoutId))
+        if (doc.DocumentType.StampsLayoutId() && !string.IsNullOrEmpty(doc.LayoutId))
         {
             contentToSync["layoutId"] = doc.LayoutId;
             _logger.LogDebug(
