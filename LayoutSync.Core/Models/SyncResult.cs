@@ -152,6 +152,8 @@ public class SyncBatchResult
     /// <summary>Total duration of the batch.</summary>
     public TimeSpan TotalDuration { get; set; }
 
-    /// <summary>Orphans detected per collection (identifier -> docId).</summary>
+    /// <summary>Orphans detected per collection (docId -> identifier). Keyed by the unique
+    /// document id so two orphans that share an identifier across layouts are both represented
+    /// and counted (issue #17).</summary>
     public Dictionary<string, Dictionary<string, string>> OrphansDetected { get; } = [];
 }

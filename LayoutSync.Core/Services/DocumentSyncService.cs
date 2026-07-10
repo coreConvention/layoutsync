@@ -55,11 +55,11 @@ public class DocumentSyncService(
         foreach (ISeedValidator validator in _validators)
             validator.Reset();
 
-        // Track synced identifiers per collection for orphan detection. Registry-driven;
-        // an excluded collection gets no bucket, which is what "skip orphan detection"
-        // means mechanically — DetectOrphansAsync iterates these KEYS. See issue #9.
-        // (The ReadPolicies bucket this branch added by hand now comes from the
-        // read-policies entry in CollectionFolders.)
+        // Track synced documents per collection for orphan detection, one bucket per collection.
+        // Each bucket holds (layoutId, identifier) COMPOSITE keys (see OrphanTrackingKey), not bare
+        // identifiers, so cross-layout identifier reuse can't mask an orphan (issue #17).
+        // Registry-driven; an excluded collection gets no bucket, which is what "skip orphan
+        // detection" means mechanically — DetectOrphansAsync iterates these KEYS. See issue #9.
         Dictionary<string, HashSet<string>> syncedIdentifiers =
             BuildOrphanTracking(_cliArgs.ExcludeCollections);
 
@@ -76,14 +76,24 @@ public class DocumentSyncService(
             SyncResult result = await SyncFileAsync(filePath, layoutsPath, dryRun, ct);
             batch.Results.Add(result);
 
-            // Track synced identifier for orphan detection (static collections only)
+            // Track synced document for orphan detection (static collections only). Key by
+            // (effective layoutId, identifier) — NOT identifier alone — so two layouts that
+            // legitimately ship the same identifier in one collection are tracked independently
+            // (issue #17). effectiveLayoutId mirrors the STORED field: the stamped layoutId for
+            // per-tenant types, "" for layout-agnostic ones — matching what
+            // GetAllOrphanCandidatesAsync reads back (and the DynamicNullObject "" of issue #13).
             if (result.Success && result.Document.DocumentType.IsStaticCollection())
             {
-                string collection = result.Document.DocumentType.GetCollection();
-                string? identifier = result.Document.Identifier;
+                SyncDocument syncedDoc = result.Document;
+                string collection = syncedDoc.DocumentType.GetCollection();
+                string? identifier = syncedDoc.Identifier;
                 if (!string.IsNullOrEmpty(identifier) && syncedIdentifiers.ContainsKey(collection))
                 {
-                    syncedIdentifiers[collection].Add(identifier);
+                    string effectiveLayoutId =
+                        syncedDoc.DocumentType.StampsLayoutId() && !string.IsNullOrEmpty(syncedDoc.LayoutId)
+                            ? syncedDoc.LayoutId!
+                            : string.Empty;
+                    syncedIdentifiers[collection].Add(OrphanTrackingKey(effectiveLayoutId, identifier));
                 }
             }
         }
@@ -298,14 +308,16 @@ public class DocumentSyncService(
             if (ct.IsCancellationRequested)
                 break;
 
-            // Get all identifiers currently in the collection (including their stamped layoutId).
+            // Get every document currently in the collection, keyed by unique document id
+            // (NOT identifier — that would collapse cross-layout duplicates; issue #17).
             Dictionary<string, RavenDbService.OrphanCandidate> existingDocs =
-                await _ravenService.GetAllIdentifiersAsync(collection, ct);
+                await _ravenService.GetAllOrphanCandidatesAsync(collection, ct);
 
-            // Find orphans (in DB but not synced from local files)
-            Dictionary<string, RavenDbService.OrphanCandidate> rawOrphans = existingDocs
-                .Where(kvp => !synced.Contains(kvp.Key))
-                .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+            // Find orphans (in DB but not synced from local files), matched by the
+            // (layoutId, identifier) composite so a document counts as "synced" only when a
+            // local file with the SAME layoutId AND identifier was seen this run (issue #17).
+            Dictionary<string, RavenDbService.OrphanCandidate> rawOrphans =
+                ComputeRawOrphans(existingDocs, synced);
 
             // Apply layout-scope filter when --layout is active. Without a scope all candidates
             // pass through (legacy unscoped clean). With a scope, only documents whose layoutId
@@ -338,14 +350,16 @@ public class DocumentSyncService(
             if (orphans.Count == 0)
                 continue;
 
-            // Track orphans in batch result. Project the richer OrphanCandidate dict back
-            // to (identifier -> docId) — the public batch model intentionally stays narrow.
+            // Track orphans in batch result as (docId -> identifier). Keyed by the unique docId
+            // so two orphans that share an identifier across layouts are both represented and
+            // counted (issue #17); the identifier stays available as the value for reporting.
             batch.OrphansDetected[collection] = orphans
-                .ToDictionary(kvp => kvp.Key, kvp => kvp.Value.DocumentId);
+                .ToDictionary(kvp => kvp.Value.DocumentId, kvp => kvp.Value.Identifier);
 
-            foreach ((string identifier, RavenDbService.OrphanCandidate candidate) in orphans)
+            foreach ((string _, RavenDbService.OrphanCandidate candidate) in orphans)
             {
                 string docId = candidate.DocumentId;
+                string identifier = candidate.Identifier;
                 if (deleteOrphans && !dryRun)
                 {
                     // Actually delete the orphan
@@ -404,6 +418,39 @@ public class DocumentSyncService(
 
         return candidates
             .Where(kvp => kvp.Value.LayoutId == scopedLayoutId)
+            .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+    }
+
+    /// <summary>
+    /// Composite orphan-tracking key: a document's identity for orphan detection is
+    /// (effective layoutId, identifier), NOT identifier alone — two layouts may ship the same
+    /// identifier in one collection (issue #17), and matching on identifier alone lets one mask
+    /// the other's orphan. Encoded as a single string so the tracking buckets stay
+    /// <c>HashSet&lt;string&gt;</c>. U+001F (Unit Separator) is the delimiter: a control character
+    /// that cannot occur in a layoutId slug or a NanoID/identifier, so no real (layoutId,
+    /// identifier) pair can collide with another.
+    /// </summary>
+    internal static string OrphanTrackingKey(string layoutId, string identifier) =>
+        $"{layoutId}\u001f{identifier}";
+
+    /// <summary>
+    /// Pure decision helper: given every document currently in a collection (keyed by unique
+    /// document id) and the set of (layoutId, identifier) composite keys synced from local files
+    /// this run, return the subset that are orphans — present in the DB but absent from the synced
+    /// set. Matching is by <see cref="OrphanTrackingKey"/>, so a document is retained (not an
+    /// orphan) only when a local file with the SAME layoutId AND identifier was synced. This is the
+    /// issue #17 fix: identifier-only matching let a cross-layout twin mask a genuine orphan. A
+    /// candidate's null/empty <c>LayoutId</c> is normalized to "" to match the synced side (RavenDB
+    /// projects a missing layoutId as ""; issue #13). Extracted <c>internal static</c> so the
+    /// composite-matching decision is unit-testable without a live RavenDB session.
+    /// </summary>
+    internal static Dictionary<string, RavenDbService.OrphanCandidate> ComputeRawOrphans(
+        Dictionary<string, RavenDbService.OrphanCandidate> existingByDocId,
+        IReadOnlySet<string> syncedKeys)
+    {
+        return existingByDocId
+            .Where(kvp => !syncedKeys.Contains(
+                OrphanTrackingKey(kvp.Value.LayoutId ?? string.Empty, kvp.Value.Identifier)))
             .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
     }
 
