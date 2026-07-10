@@ -146,4 +146,26 @@ public static class DocumentTypeExtensions
     /// </summary>
     public static bool IsStaticCollection(this DocumentType type) =>
         type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow or DocumentType.WritePolicy or DocumentType.ReadPolicy or DocumentType.EntityConfig or DocumentType.Theme;
+
+    /// <summary>
+    /// Returns true for document types whose stored document carries a top-level
+    /// <c>layoutId</c> field, stamped from the layout directory name at sync time.
+    /// These are the per-tenant, layout-scoped collections. System collections
+    /// (sections, layouts, menus, modals, manifests, tags, workflows) are layout-agnostic
+    /// and carry NO <c>layoutId</c> field even though their source files live under a
+    /// layout directory — so this is intentionally narrower than
+    /// <see cref="IsStaticCollection"/>.
+    /// </summary>
+    /// <remarks>
+    /// Single source of truth for "does this document have a <c>layoutId</c> field". The sync
+    /// writer consults it to decide whether to STAMP the field
+    /// (<c>DocumentSyncService.SyncFileAsync</c>), and the lookup reader consults it to decide
+    /// whether to SCOPE the identifier query by <c>layoutId</c>
+    /// (<see cref="RavenDbService.FindDocumentAsync"/>). Keeping both on this one predicate
+    /// guarantees the write and the read never disagree: scoping a lookup by a field the
+    /// document does not carry would match zero rows and spuriously re-create the document on
+    /// every sync. See issue #16.
+    /// </remarks>
+    public static bool StampsLayoutId(this DocumentType type) =>
+        type is DocumentType.Entity or DocumentType.WritePolicy or DocumentType.ReadPolicy or DocumentType.EntityConfig or DocumentType.Theme;
 }
