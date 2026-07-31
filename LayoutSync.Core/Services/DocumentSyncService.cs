@@ -538,6 +538,7 @@ public class DocumentSyncService(
         "WritePolicies" => DocumentType.WritePolicy,
         "ReadPolicies" => DocumentType.ReadPolicy,
         "entity-configs" => DocumentType.EntityConfig,
+        "email-templates" => DocumentType.EmailTemplate,
         "theme-definitions" => DocumentType.Theme,
         _ => DocumentType.Entity
     };
@@ -729,6 +730,7 @@ public class DocumentSyncService(
         int readPolicies = batch.Results.Count(r => r.Document.DocumentType == DocumentType.ReadPolicy);
         int entityConfigs = batch.Results.Count(r => r.Document.DocumentType == DocumentType.EntityConfig);
         int themes = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Theme);
+        int emailTemplates = batch.Results.Count(r => r.Document.DocumentType == DocumentType.EmailTemplate);
         int entities = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Entity);
         int identities = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Identity);
 
@@ -745,6 +747,7 @@ public class DocumentSyncService(
         if (readPolicies > 0) parts.Add($"{readPolicies} read policies");
         if (entityConfigs > 0) parts.Add($"{entityConfigs} entity configs");
         if (themes > 0) parts.Add($"{themes} themes");
+        if (emailTemplates > 0) parts.Add($"{emailTemplates} email templates");
         if (entities > 0) parts.Add($"{entities} entities");
         if (identities > 0) parts.Add($"{identities} identities");
 

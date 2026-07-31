@@ -22,7 +22,7 @@ public class CollectionFoldersTests
     [
         "layouts", "menus", "manifests", "sections", "modals", "entities",
         "identities", "tags", "workflows", "write-policies", "read-policies",
-        "entity-configs", "themes",
+        "entity-configs", "themes", "email-templates",
     ];
 
     [Fact]

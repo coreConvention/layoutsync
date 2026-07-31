@@ -33,6 +33,7 @@ public static class CollectionFolders
         ("read-policies", DocumentType.ReadPolicy),
         ("entity-configs", DocumentType.EntityConfig),
         ("themes", DocumentType.Theme),
+        ("email-templates", DocumentType.EmailTemplate),
     ];
 
     /// <summary>
