@@ -28,6 +28,7 @@ public class LayoutScopedLookupTests
     [InlineData(DocumentType.WritePolicy)]
     [InlineData(DocumentType.ReadPolicy)]
     [InlineData(DocumentType.EntityConfig)]
+    [InlineData(DocumentType.EmailTemplate)]
     [InlineData(DocumentType.Theme)]
     public void StampsLayoutId_PerTenantTypes_ReturnTrue(DocumentType type)
         => Assert.True(type.StampsLayoutId());

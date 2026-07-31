@@ -23,6 +23,7 @@ public class OrphanExclusionTests
     [
         "layouts", "menus", "manifests", "sections", "modals", "tags",
         "workflows", "WritePolicies", "ReadPolicies", "entity-configs", "theme-definitions",
+        "email-templates",
     ];
 
     // ── BuildOrphanTracking ──────────────────────────────────────────────────

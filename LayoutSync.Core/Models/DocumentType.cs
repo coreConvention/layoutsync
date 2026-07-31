@@ -82,6 +82,13 @@ public enum DocumentType
     EntityConfig,
 
     /// <summary>
+    /// Email template definition from email-templates/ folder.
+    /// Pre-wrapped with type "email-template".
+    /// Layout-scoped — layoutId is injected automatically.
+    /// </summary>
+    EmailTemplate,
+
+    /// <summary>
     /// Theme definition from a <c>themes/</c> folder.
     /// Pre-wrapped with type "theme-definition". Two scopes are supported:
     /// <list type="bullet">
@@ -135,6 +142,7 @@ public static class DocumentTypeExtensions
         DocumentType.WritePolicy => "WritePolicies",
         DocumentType.ReadPolicy => "ReadPolicies",
         DocumentType.EntityConfig => "entity-configs",
+        DocumentType.EmailTemplate => "email-templates",
         DocumentType.Theme => "theme-definitions",
         DocumentType.Identity => "identities",
         DocumentType.Entity => "entities",
@@ -145,7 +153,7 @@ public static class DocumentTypeExtensions
     /// Returns true if the collection is safe for orphan cleanup (static data only).
     /// </summary>
     public static bool IsStaticCollection(this DocumentType type) =>
-        type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow or DocumentType.WritePolicy or DocumentType.ReadPolicy or DocumentType.EntityConfig or DocumentType.Theme;
+        type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow or DocumentType.WritePolicy or DocumentType.ReadPolicy or DocumentType.EntityConfig or DocumentType.EmailTemplate or DocumentType.Theme;
 
     /// <summary>
     /// Returns true for document types whose stored document carries a top-level
@@ -167,5 +175,5 @@ public static class DocumentTypeExtensions
     /// every sync. See issue #16.
     /// </remarks>
     public static bool StampsLayoutId(this DocumentType type) =>
-        type is DocumentType.Entity or DocumentType.WritePolicy or DocumentType.ReadPolicy or DocumentType.EntityConfig or DocumentType.Theme;
+        type is DocumentType.Entity or DocumentType.WritePolicy or DocumentType.ReadPolicy or DocumentType.EntityConfig or DocumentType.EmailTemplate or DocumentType.Theme;
 }
