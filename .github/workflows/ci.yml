@@ -2,9 +2,10 @@
 #
 # Build + test gate on PRs and pushes to main. The repo had no CI before #10;
 # this keeps main releasable so tag-triggered releases (release.yml) always
-# publish from a known-green tree.
+# publish from a known-green tree. release.yml also calls this workflow as its
+# pre-publish gate, so a release is tested exactly the way CI tests.
 #
-# Issue: #10
+# Issues: #10, #43
 name: CI
 
 on:
@@ -12,6 +13,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call: # release.yml's pre-publish gate
 
 permissions:
   contents: read
@@ -19,6 +21,30 @@ permissions:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+
+    services:
+      # A throwaway RavenDB for LiveSyncTests, the only tests that go through the real
+      # RavenDB client (#43). Unsecured because each test creates and drops its own
+      # database. 7.1 is the server version the tests were validated against.
+      ravendb:
+        image: ravendb/ravendb:7.1-ubuntu-latest
+        env:
+          RAVEN_Setup_Mode: None
+          RAVEN_License_Eula_Accepted: 'true'
+          RAVEN_Security_UnsecuredAccessAllowed: PublicNetwork
+          # The image binds to the container's hostname by default, which the health
+          # check below could not reach on localhost.
+          RAVEN_ServerUrl: http://0.0.0.0:8080
+        ports:
+          - 8080:8080
+        # The image's own health check only confirms the process exists. Probing HTTP
+        # makes the runner hold the job until the server can answer.
+        options: >-
+          --health-cmd "curl -fsS http://localhost:8080/build/version"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 24
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,3 +58,6 @@ jobs:
         # dotnet test builds the whole solution first, so this covers both.
         # No -warnaserror — main carries a known pre-existing SYSLIB0057 cert-API warning.
         run: dotnet test LayoutSync.sln -c Release
+        env:
+          # Opts LiveSyncTests in; without it they skip.
+          LAYOUTSYNC_TEST_RAVENDB_URL: http://localhost:8080
