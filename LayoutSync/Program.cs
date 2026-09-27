@@ -61,7 +61,7 @@ public class Program
 
         Option<bool> syncOnceOption = new(
             aliases: ["--sync-once"],
-            description: "Sync once and exit (no watch mode)")
+            description: "Sync once and exit (no watch mode). Exits with code 5 if any document failed to sync (a file could not be read or parsed, or writing its document failed), with or without --strict; 5 takes precedence over --strict's code 2. See issue #36.")
         { IsRequired = false };
 
         Option<bool> validateOnlyOption = new(
@@ -381,6 +381,11 @@ public class Program
             // Get sync service
             DocumentSyncService syncService = host.Services.GetRequiredService<DocumentSyncService>();
 
+            // The batch a --sync-once run produced, kept for the failed-documents check below.
+            // Stays null in every other mode: watch mode runs until Ctrl+C and logs each failure
+            // as it happens, and nothing reads its exit code. See issue #36.
+            LayoutSync.Models.SyncBatchResult? syncOnceResult = null;
+
             if (args.ValidateOnly)
             {
                 Log.Information("Validation mode - checking for issues...");
@@ -396,7 +401,7 @@ public class Program
                 Log.Information("Sync once mode - syncing all files...");
                 if (args.Clean)
                     Log.Information("Clean mode - orphaned documents will be deleted from static collections");
-                await syncService.SyncAllAsync(layoutsPath, args.Layout, args.DryRun, args.Clean);
+                syncOnceResult = await syncService.SyncAllAsync(layoutsPath, args.Layout, args.DryRun, args.Clean);
             }
             else
             {
@@ -434,6 +439,7 @@ public class Program
             //   • dangling / unpinned-target cross-references (SeedCrossReferenceValidator, #300)
             //   • dead/no-op widget props on sections (DeadWidgetPropValidator, #984)
             // Detection-only: none of these mutate state. Strict mode is the CI escalation hook.
+            int exitCode = 0;
             if (args.Strict)
             {
                 // Same singleton instances DocumentSyncService was injected with, so their counters
@@ -447,10 +453,23 @@ public class Program
                 foreach (string offense in offenses)
                     Log.Error("{StrictOffense}", offense);
 
-                return StrictModeGate.ExitCodeFor(offenses);
+                exitCode = StrictModeGate.ExitCodeFor(offenses);
             }
 
-            return 0;
+            // Failed documents: a --sync-once run (dry runs included) that could not read a file or
+            // write its document exits 5, with or without --strict. Checked after the strict gate so
+            // its offenses are still logged; 5 wins over 2 because CI reads 2 as "every write
+            // succeeded". See issue #36.
+            if (syncOnceResult is not null)
+            {
+                string? failure = SyncFailureGate.Describe(syncOnceResult);
+                if (failure is not null)
+                    Log.Error("{SyncFailure}", failure);
+
+                exitCode = SyncFailureGate.ExitCodeFor(syncOnceResult.FailedCount, exitCode);
+            }
+
+            return exitCode;
         }
         catch (Exception ex)
         {
