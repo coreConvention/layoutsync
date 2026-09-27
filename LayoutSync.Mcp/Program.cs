@@ -12,7 +12,8 @@ namespace LayoutSync.Mcp;
 /// Entry point for the LayoutSync MCP server. This is a thin wrapper over the file
 /// mutation services in <c>LayoutSync.Core</c> — every tool method translates an MCP
 /// invocation into a call against the same service that powers the CLI's
-/// <c>layoutsync manifest set-route</c> / <c>from-json</c> commands.
+/// <c>layoutsync manifest</c> subcommands (<c>set-route</c> / <c>from-json</c>,
+/// <c>add-section</c> / <c>rename-section</c> / <c>remove-section</c>).
 ///
 /// Transport: stdio. Logs are routed to stderr so stdout is reserved for MCP framing
 /// (any byte on stdout that isn't a JSON-RPC frame would corrupt the protocol).
@@ -28,8 +29,8 @@ namespace LayoutSync.Mcp;
 /// </list>
 ///
 /// Once running, the server registers under the name "layoutsync" in <c>.mcp.json</c>
-/// and exposes the tools defined in <see cref="ManifestTools"/> and
-/// <see cref="ManifestReadTools"/>.
+/// and exposes the tools defined in <see cref="ManifestTools"/>,
+/// <see cref="ManifestSectionTools"/> and <see cref="ManifestReadTools"/>.
 /// </summary>
 public static class Program
 {
@@ -59,6 +60,7 @@ public static class Program
             builder.Services.AddSingleton<LocalFileService>();
             builder.Services.AddSingleton<ManifestSectionValidator>();
             builder.Services.AddSingleton<ManifestMutationService>();
+            builder.Services.AddSingleton<ManifestSectionRegistryService>();
 
             // MCP server with stdio transport. WithTools<T> registers each tool class.
             // The instructions carry the one fact no static tool description can: the
@@ -68,6 +70,7 @@ public static class Program
                 .AddMcpServer(options => options.ServerInstructions = BuildServerInstructions(layoutsPath))
                 .WithStdioServerTransport()
                 .WithTools<ManifestTools>()
+                .WithTools<ManifestSectionTools>()
                 .WithTools<ManifestReadTools>();
 
             using IHost host = builder.Build();

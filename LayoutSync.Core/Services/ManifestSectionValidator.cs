@@ -114,9 +114,10 @@ public class ManifestSectionValidator(ILogger<ManifestSectionValidator> logger)
     /// Returns the set of section identifiers declared under
     /// <c>entities.sections[*].identifier</c>. An empty set is returned (rather than an
     /// exception) when the manifest is missing those keys, so a degenerate manifest
-    /// produces clean validation errors rather than crashes.
+    /// produces clean validation errors rather than crashes. Also the suggestion pool for
+    /// <see cref="ManifestSectionRegistryService"/>'s "did you mean" hints.
     /// </summary>
-    private static HashSet<string> CollectDeclaredSectionIdentifiers(JsonObject manifestContent)
+    internal static HashSet<string> CollectDeclaredSectionIdentifiers(JsonObject manifestContent)
     {
         HashSet<string> declared = new(StringComparer.Ordinal);
         if (manifestContent["entities"] is JsonObject entities

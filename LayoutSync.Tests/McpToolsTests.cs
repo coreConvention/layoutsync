@@ -26,6 +26,7 @@ public class McpToolsTests : IDisposable
     private readonly LocalFileService _fileService;
     private readonly ManifestSectionValidator _validator;
     private readonly ManifestMutationService _mutationService;
+    private readonly ManifestSectionRegistryService _registryService;
     private const string LayoutId = "test-layout";
 
     public McpToolsTests()
@@ -39,6 +40,8 @@ public class McpToolsTests : IDisposable
         _validator = new ManifestSectionValidator(NullLogger<ManifestSectionValidator>.Instance);
         _mutationService = new ManifestMutationService(
             _fileService, _validator, NullLogger<ManifestMutationService>.Instance);
+        _registryService = new ManifestSectionRegistryService(
+            _fileService, NullLogger<ManifestSectionRegistryService>.Instance);
     }
 
     public void Dispose()
@@ -421,7 +424,8 @@ public class McpToolsTests : IDisposable
             .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
             .ToArray();
 
-        Assert.Equal(5, toolMethods.Length);
+        // 5 route/read tools (#29) + 3 section-registry tools (#30).
+        Assert.Equal(8, toolMethods.Length);
         foreach (MethodInfo method in toolMethods)
         {
             ParameterInfo? parameter = method.GetParameters().SingleOrDefault(p => p.Name == "layoutsPath");
@@ -434,6 +438,121 @@ public class McpToolsTests : IDisposable
             Assert.Contains("layoutsPath", description);
             Assert.Contains("manifestPath", description);
         }
+    }
+
+    // ───── section registry tools (issue #30) ─────
+
+    [Fact]
+    public async Task ManifestAddSection_ReturnsEnvelopeWithConventionalEntry()
+    {
+        WriteFixture();
+        ManifestSectionTools tools = new(_registryService, _pathProvider);
+
+        string output = await tools.ManifestAddSection(LayoutId, "new-section", dryRun: true, layoutsPath: _layoutsPath);
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+
+        Assert.Equal("manifest add-section", envelope["command"]?.GetValue<string>());
+        Assert.Equal(ManifestPathIn(_layoutsPath), envelope["manifestPath"]?.GetValue<string>());
+        Assert.True(envelope["success"]?.GetValue<bool>());
+        Assert.Null(envelope["before"]);
+        Assert.Equal("ui-schema-section", envelope["after"]?["type"]?.GetValue<string>());
+        Assert.Equal("sections/new-section.json", envelope["after"]?["file"]?.GetValue<string>());
+        // The fixture has no section files on disk, so the missing file is flagged.
+        Assert.Contains("does not exist", Assert.Single(envelope["warnings"]!.AsArray())!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ManifestRenameSection_ReportsEveryRewrittenReference()
+    {
+        WriteFixture();
+        ManifestSectionTools tools = new(_registryService, _pathProvider);
+
+        string output = await tools.ManifestRenameSection(
+            LayoutId, "sidebar-user-summary", "events-sidebar-summary",
+            manifestOnly: true, dryRun: true, layoutsPath: _layoutsPath);
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+
+        Assert.Equal("manifest rename-section", envelope["command"]?.GetValue<string>());
+        Assert.True(envelope["success"]?.GetValue<bool>());
+        Assert.Equal("events-sidebar-summary", envelope["newIdentifier"]?.GetValue<string>());
+        Assert.Equal(
+            "/routeConfigs/~1events/patches/1/sectionIdentifiers/0",
+            Assert.Single(envelope["references"]!.AsArray())?.GetValue<string>());
+        // Registry entry + one reference.
+        Assert.Equal(2, envelope["patch"]!.AsArray().Count);
+        Assert.Single(envelope["filesChanged"]!.AsArray());
+    }
+
+    [Fact]
+    public async Task ManifestRemoveSection_RefusesWhileReferenced()
+    {
+        WriteFixture();
+        ManifestSectionTools tools = new(_registryService, _pathProvider);
+
+        string output = await tools.ManifestRemoveSection(LayoutId, "sidebar-layout", layoutsPath: _layoutsPath);
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+
+        Assert.False(envelope["success"]?.GetValue<bool>());
+        // Refusals name their target too.
+        Assert.Equal(ManifestPathIn(_layoutsPath), envelope["manifestPath"]?.GetValue<string>());
+        Assert.Null(envelope["patch"]);
+        Assert.Equal(
+            "/routeConfigs/~1events/structuralSection",
+            Assert.Single(envelope["references"]!.AsArray())?.GetValue<string>());
+        Assert.Single(envelope["errors"]!.AsArray());
+        Assert.Empty(envelope["warnings"]!.AsArray());
+    }
+
+    [Fact]
+    public async Task ManifestRenameSection_WithLayoutsPath_WritesThatCheckoutAndLeavesDefaultUntouched()
+    {
+        WriteFixture();
+        string otherLayouts = WriteFixtureInOtherCheckout();
+        ManifestSectionTools tools = new(_registryService, _pathProvider);
+
+        string output = await tools.ManifestRenameSection(
+            LayoutId, "sidebar-layout", "events-sidebar-layout",
+            manifestOnly: true, layoutsPath: Path.GetDirectoryName(otherLayouts)); // checkout-root form
+
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+        Assert.True(envelope["success"]?.GetValue<bool>());
+        Assert.Equal(ManifestPathIn(otherLayouts), envelope["manifestPath"]?.GetValue<string>());
+        Assert.Contains("events-sidebar-layout", File.ReadAllText(ManifestPathIn(otherLayouts)));
+        Assert.Equal(StandardFixture, File.ReadAllText(ManifestPathIn(_layoutsPath)));
+    }
+
+    [Theory]
+    [InlineData(true, "targeted")]
+    [InlineData(false, "wrote to")]
+    public async Task SectionTools_WithoutLayoutsPath_WarnWhichDefaultFileTheyUsed(bool dryRun, string verb)
+    {
+        WriteFixture();
+        ManifestSectionTools tools = new(_registryService, _pathProvider);
+
+        string output = await tools.ManifestRemoveSection(LayoutId, "full-width-layout", dryRun: dryRun);
+
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+        string defaultManifest = ManifestPathIn(_layoutsPath);
+        Assert.True(envelope["success"]?.GetValue<bool>());
+        Assert.Equal(defaultManifest, envelope["manifestPath"]?.GetValue<string>());
+        string warning = Assert.Single(envelope["warnings"]!.AsArray())!.GetValue<string>();
+        Assert.Contains("layoutsPath was not passed", warning);
+        Assert.Contains($"{verb} {defaultManifest}", warning);
+    }
+
+    [Fact]
+    public async Task SectionTools_RelativeLayoutsPath_AreRejectedBeforeAnyWrite()
+    {
+        WriteFixture();
+        ManifestSectionTools tools = new(_registryService, _pathProvider);
+
+        await Assert.ThrowsAsync<McpException>(() => tools.ManifestAddSection(LayoutId, "x", layoutsPath: "layouts"));
+        await Assert.ThrowsAsync<McpException>(() => tools.ManifestRenameSection(
+            LayoutId, "sidebar-layout", "y", manifestOnly: true, layoutsPath: "layouts"));
+        await Assert.ThrowsAsync<McpException>(() => tools.ManifestRemoveSection(
+            LayoutId, "full-width-layout", layoutsPath: "layouts"));
+
+        Assert.Equal(StandardFixture, File.ReadAllText(ManifestPathIn(_layoutsPath)));
     }
 
     private void WriteFixture()

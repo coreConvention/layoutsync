@@ -5,12 +5,12 @@ using LayoutSync.Models;
 namespace LayoutSync.Configuration;
 
 /// <summary>
-/// Serializes a <see cref="MutationResult"/> into the stable JSON envelope that the
-/// CLI's <c>--json</c> mode emits on stdout. This is the contract that consumers — CI
-/// scripts, the MCP server, and external automation — bind to, so the schema is
-/// intentionally documented and stable.
+/// Serializes a <see cref="MutationResult"/> or <see cref="SectionMutationResult"/> into the
+/// stable JSON envelope that the CLI's <c>--json</c> mode emits on stdout. This is the
+/// contract that consumers — CI scripts, the MCP server, and external automation — bind to,
+/// so the schema is intentionally documented and stable.
 ///
-/// Envelope shape:
+/// Route envelope shape (<see cref="MutationResult"/>):
 /// <code>
 /// {
 ///   "command":      "manifest set-route" | "manifest from-json" | "manifest apply-batch",
@@ -36,6 +36,29 @@ namespace LayoutSync.Configuration;
 /// <c>manifestPath</c> (issue #29) names the file the command read and wrote. With several
 /// git worktrees on disk the same <c>layoutId</c> maps to a different file in each, so
 /// the path is the only field that tells a caller which checkout was actually touched.
+///
+/// Section-registry envelope shape (<see cref="SectionMutationResult"/>). Same outer frame;
+/// <c>before</c> / <c>after</c> are the <c>entities.sections</c> entry, <c>patch</c> paths
+/// are JSON Pointers from the manifest root, and <c>filesChanged</c> can also name the
+/// section file a rename rewrote:
+/// <code>
+/// {
+///   "command":       "manifest add-section" | "manifest rename-section" | "manifest remove-section",
+///   "layoutId":      "cream-pi",
+///   "manifestPath":  "/abs/path/layouts/cream-pi/manifests/layout-manifest.json" | null,
+///   "dryRun":        true | false,
+///   "success":       true | false,
+///   "identifier":    "full-width-layout",
+///   "newIdentifier": "cream-pi-full-width-layout" | null,
+///   "before":        { ... } | null,
+///   "after":         { ... } | null,
+///   "patch":         [ ...rfc6902... ] | null,
+///   "references":    [ "/routeConfigs/~1/structuralSection", ... ],
+///   "filesChanged":  [ "/abs/path/layouts/cream-pi/manifests/layout-manifest.json", ... ],
+///   "warnings":      [ "string", ... ],
+///   "errors":        [ "string", ... ]
+/// }
+/// </code>
 /// </summary>
 public static class JsonOutputFormatter
 {
@@ -96,6 +119,53 @@ public static class JsonOutputFormatter
         bool dryRun,
         MutationResult result)
         => Format(command, layoutId, dryRun, result).ToJsonString(PrettyOptions);
+
+    /// <summary>
+    /// Builds the section-registry envelope. Key order mirrors the route envelope's frame
+    /// (<c>command</c>, <c>layoutId</c>, <c>dryRun</c>, <c>success</c> first; <c>warnings</c>,
+    /// <c>errors</c> last) so both read the same way.
+    /// </summary>
+    public static JsonObject Format(
+        string command,
+        string layoutId,
+        bool dryRun,
+        SectionMutationResult result)
+    {
+        return new JsonObject
+        {
+            ["command"] = command,
+            ["layoutId"] = layoutId,
+            ["manifestPath"] = result.ManifestPath,
+            ["dryRun"] = dryRun,
+            ["success"] = result.Success,
+            ["identifier"] = result.Identifier,
+            ["newIdentifier"] = result.NewIdentifier,
+            ["before"] = result.Before?.DeepClone(),
+            ["after"] = result.After?.DeepClone(),
+            ["patch"] = result.Patch?.DeepClone(),
+            ["references"] = ToJsonArray(result.References),
+            ["filesChanged"] = ToJsonArray(result.FilesChanged),
+            ["warnings"] = ToJsonArray(result.Warnings),
+            ["errors"] = ToJsonArray(result.Errors),
+        };
+    }
+
+    /// <summary>
+    /// Section-registry counterpart of <see cref="FormatAsString(string, string, bool, MutationResult)"/>.
+    /// </summary>
+    public static string FormatAsString(
+        string command,
+        string layoutId,
+        bool dryRun,
+        SectionMutationResult result)
+        => Format(command, layoutId, dryRun, result).ToJsonString(PrettyOptions);
+
+    private static JsonArray ToJsonArray(IReadOnlyList<string> values)
+    {
+        JsonArray array = [];
+        foreach (string value in values) array.Add(value);
+        return array;
+    }
 
     private static JsonObject SerializeChange(RouteChange change)
     {

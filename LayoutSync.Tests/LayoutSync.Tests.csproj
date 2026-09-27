@@ -21,5 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\LayoutSync.Core\LayoutSync.Core.csproj" />
     <ProjectReference Include="..\LayoutSync.Mcp\LayoutSync.Mcp.csproj" />
+    <!-- The CLI, so ManifestSectionCommandsTests can drive the manifest subcommands end to end. -->
+    <ProjectReference Include="..\LayoutSync\LayoutSync.csproj" />
   </ItemGroup>
 </Project>

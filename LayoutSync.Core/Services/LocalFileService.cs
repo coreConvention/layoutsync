@@ -129,6 +129,21 @@ public class LocalFileService(ILogger<LocalFileService> logger)
     }
 
     /// <summary>
+    /// Reads a file's raw bytes, for byte-exact edits where a parse/serialize round-trip
+    /// would reformat the file (see <see cref="ManifestSectionRegistryService"/>). Virtual so
+    /// tests can simulate I/O failures deterministically; file permissions cannot, because
+    /// they do not stop root.
+    /// </summary>
+    public virtual Task<byte[]> ReadAllBytesAsync(string filePath, CancellationToken ct = default)
+        => File.ReadAllBytesAsync(filePath, ct);
+
+    /// <summary>
+    /// Replaces a file with <paramref name="content"/>. Counterpart of <see cref="ReadAllBytesAsync"/>.
+    /// </summary>
+    public virtual Task WriteAllBytesAsync(string filePath, byte[] content, CancellationToken ct = default)
+        => File.WriteAllBytesAsync(filePath, content, ct);
+
+    /// <summary>
     /// Discovers all JSON files in a layouts directory, plus platform-scoped
     /// theme files from a sibling <c>themes/</c> directory (the platform
     /// catalogue, available to every tenant). Platform-scoped discovery is
