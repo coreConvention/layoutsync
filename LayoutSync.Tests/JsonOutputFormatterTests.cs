@@ -143,6 +143,37 @@ public class JsonOutputFormatterTests
         Assert.Equal("c", roundTripped["command"]?.GetValue<string>());
     }
 
+    [Fact]
+    public void Format_SectionEnvelope_KeepsEveryKeyEvenWhenNull()
+    {
+        SectionMutationResult refused = new(
+            Success: false,
+            ManifestPath: "/repo/layouts/dl/manifests/layout-manifest.json",
+            Identifier: "hero",
+            NewIdentifier: null,
+            Before: null,
+            After: null,
+            Patch: null,
+            References: [],
+            FilesChanged: [],
+            Errors: ["Section 'hero' is not declared in entities.sections."],
+            Warnings: []);
+
+        JsonObject envelope = JsonOutputFormatter.Format("manifest remove-section", "dl", false, refused);
+
+        // Stable shape: a consumer never has to tell "missing" from "null".
+        string[] expectedKeys =
+        [
+            "command", "layoutId", "manifestPath", "dryRun", "success", "identifier", "newIdentifier",
+            "before", "after", "patch", "references", "filesChanged", "warnings", "errors",
+        ];
+        Assert.Equal(expectedKeys, envelope.Select(property => property.Key));
+        Assert.Equal("/repo/layouts/dl/manifests/layout-manifest.json", envelope["manifestPath"]?.GetValue<string>());
+        Assert.Equal("hero", envelope["identifier"]?.GetValue<string>());
+        Assert.False(envelope["success"]?.GetValue<bool>());
+        Assert.Single(envelope["errors"]!.AsArray());
+    }
+
     [Theory]
     [InlineData(RouteChangeStatus.Applied, "applied")]
     [InlineData(RouteChangeStatus.Skipped, "skipped")]

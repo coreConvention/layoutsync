@@ -6,8 +6,11 @@ namespace LayoutSync.Services;
 
 /// <summary>
 /// Programmatic mutator for <c>layouts/{layoutId}/manifests/layout-manifest.json</c>.
-/// The single canonical entry point for every change to <c>routeConfigs</c> — replaces
-/// the ad-hoc <c>node -e "..."</c> one-liners that previously edited the file off-pipeline.
+/// The single canonical entry point for every route-level change to <c>routeConfigs</c> —
+/// replaces the ad-hoc <c>node -e "..."</c> one-liners that previously edited the file
+/// off-pipeline. Changes to the <c>entities.sections</c> registry (including the reference
+/// rewrites a section rename makes inside <c>routeConfigs</c>) go through
+/// <see cref="ManifestSectionRegistryService"/>.
 ///
 /// Architecture:
 /// <list type="bullet">
@@ -441,7 +444,9 @@ public class ManifestMutationService(
     /// RFC 6901 JSON Pointer escaping: <c>~</c> becomes <c>~0</c> and <c>/</c> becomes
     /// <c>~1</c>. Necessary because route keys typically contain <c>/</c> (e.g.
     /// <c>/events/my-rsvps</c>) — without escaping, the pointer would be ambiguous.
+    /// Shared with <see cref="ManifestSectionRegistryService"/>, whose patches point into
+    /// <c>routeConfigs</c> by route key.
     /// </summary>
-    private static string EscapeJsonPointer(string token)
+    internal static string EscapeJsonPointer(string token)
         => token.Replace("~", "~0").Replace("/", "~1");
 }
