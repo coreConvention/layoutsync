@@ -17,7 +17,10 @@ public class LocalFileService(ILogger<LocalFileService> logger)
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        // Characters stay literal (em dashes, apostrophes, emoji) instead of the default
+        // encoder's HTML-safe escapes, so a write only changes the lines it means to (#38).
+        Encoder = LiteralJsonEncoder.Instance
     };
 
     /// <summary>
@@ -119,11 +122,18 @@ public class LocalFileService(ILogger<LocalFileService> logger)
     }
 
     /// <summary>
-    /// Writes a JSON document back to file.
+    /// Writes a JSON document back to file: indented, with characters written literally
+    /// (see <see cref="LiteralJsonEncoder"/>), and ending with exactly one newline.
     /// </summary>
     public async Task WriteDocumentAsync(string filePath, JsonObject content)
     {
-        string json = content.ToJsonString(JsonOptions);
+        // Always end with one newline (#38). Text files end with a newline (POSIX, and
+        // consuming repos set EditorConfig insert_final_newline), and appending it
+        // unconditionally, rather than keeping whatever the file had, makes the bytes depend
+        // only on the document: a tool write no longer removes the newline an editor save
+        // just added. It is the serializer's own NewLine (Environment.NewLine by default),
+        // so a file never mixes CRLF and LF.
+        string json = content.ToJsonString(JsonOptions) + JsonOptions.NewLine;
         await File.WriteAllTextAsync(filePath, json);
         _logger.LogDebug("Wrote file: {Path}", filePath);
     }
