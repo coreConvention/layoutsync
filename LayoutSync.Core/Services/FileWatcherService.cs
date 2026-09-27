@@ -348,7 +348,8 @@ public class FileWatcherService(
                         {
                             SyncAction.Created => "Created",
                             SyncAction.Patched => "Patched",
-                            SyncAction.Recreated => "Recreated",
+                            SyncAction.Replaced => "Replaced",
+                            SyncAction.Unchanged => "Unchanged",
                             _ => "Synced"
                         };
                         _logger.LogInformation("-> {Action} '{Identifier}'", action, result.Document.Identifier);

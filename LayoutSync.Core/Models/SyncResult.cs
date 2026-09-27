@@ -85,6 +85,19 @@ public class SyncResult
             ErrorMessage = reason,
             RavenDocumentId = ravenDocId
         };
+
+    /// <summary>
+    /// Creates a result for a document whose stored content already matches the local file,
+    /// so no write was made (or, under --dry-run, none would be).
+    /// </summary>
+    public static SyncResult Unchanged(SyncDocument document, string ravenDocId) =>
+        new()
+        {
+            Document = document,
+            Action = SyncAction.Unchanged,
+            Success = true,
+            RavenDocumentId = ravenDocId
+        };
 }
 
 /// <summary>
@@ -92,7 +105,7 @@ public class SyncResult
 /// </summary>
 public enum SyncAction
 {
-    /// <summary>Document was skipped (no changes detected).</summary>
+    /// <summary>Document was skipped (dry run, or the file could not be read).</summary>
     Skipped,
 
     /// <summary>New document was created in database.</summary>
@@ -101,8 +114,12 @@ public enum SyncAction
     /// <summary>Existing document was updated via JSON Patch.</summary>
     Patched,
 
-    /// <summary>Document was deleted and recreated (patch failed).</summary>
-    Recreated,
+    /// <summary>Existing document was overwritten in place with the file's content (a single
+    /// full-document PUT at the same @id; the document is never absent).</summary>
+    Replaced,
+
+    /// <summary>Stored document already matches the local file; no write was made.</summary>
+    Unchanged,
 
     /// <summary>Document was deleted from database.</summary>
     Deleted,
@@ -138,10 +155,13 @@ public class SyncBatchResult
     public int CreatedCount => Results.Count(r => r.Action == SyncAction.Created);
 
     /// <summary>Number of documents updated.</summary>
-    public int UpdatedCount => Results.Count(r => r.Action is SyncAction.Patched or SyncAction.Recreated);
+    public int UpdatedCount => Results.Count(r => r.Action is SyncAction.Patched or SyncAction.Replaced);
 
     /// <summary>Number of documents skipped.</summary>
     public int SkippedCount => Results.Count(r => r.Action == SyncAction.Skipped);
+
+    /// <summary>Number of documents whose stored content already matched the local file.</summary>
+    public int UnchangedCount => Results.Count(r => r.Action == SyncAction.Unchanged);
 
     /// <summary>Number of documents with human-readable IDs.</summary>
     public int HumanReadableIdCount => Results.Count(r => r.Document.HasHumanReadableId);
