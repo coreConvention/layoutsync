@@ -82,7 +82,7 @@ public class DocumentSyncService(
             // (issue #17). effectiveLayoutId mirrors the STORED field: the stamped layoutId for
             // per-tenant types, "" for layout-agnostic ones — matching what
             // GetAllOrphanCandidatesAsync reads back (and the DynamicNullObject "" of issue #13).
-            if (result.Success && result.Document.DocumentType.IsStaticCollection())
+            if (CountsAsLocalFile(result))
             {
                 SyncDocument syncedDoc = result.Document;
                 string collection = syncedDoc.DocumentType.GetCollection();
@@ -178,7 +178,21 @@ public class DocumentSyncService(
         doc.WrappedContent = contentToSync;
 
         // Look up in database
-        (string? existingDocId, JsonObject? existingDoc) = await _ravenService.FindDocumentAsync(doc, ct);
+        (string? existingDocId, JsonObject? existingDoc, string? existingChangeVector) =
+            await _ravenService.FindDocumentAsync(doc, ct);
+
+        // Compare BEFORE the dry-run branch so --dry-run is a true diff: "Would UPDATE" only when
+        // the stored document actually differs, not for every existing document (issue #11).
+        // Documents with relative-date seeds ("+3d") re-resolve against the clock every run, so
+        // they legitimately differ — and are rewritten — on every sync.
+        if (existingDocId != null && ContentEquals(existingDoc, contentToSync))
+        {
+            if (dryRun)
+                _logger.LogInformation("No changes: {Path}", doc.RelativePath);
+            else
+                _logger.LogInformation("No changes: {Identifier}", doc.Identifier);
+            return SyncResult.Unchanged(doc, existingDocId);
+        }
 
         if (dryRun)
         {
@@ -208,27 +222,22 @@ public class DocumentSyncService(
             }
             else
             {
-                // Check if content changed (ignoring $type metadata that may exist in DB)
-                if (ContentEquals(existingDoc, contentToSync))
-                {
-                    _logger.LogDebug("No changes: {Identifier}", doc.Identifier);
-                    return SyncResult.Skipped(doc, "No changes detected", ravenDocId: existingDocId);
-                }
-
-                // ALWAYS use replace (delete + create) instead of patch
-                // This ensures $type metadata is removed from existing documents
-                // Patching only updates values but doesn't remove existing $type properties
-                string? newId = await _ravenService.ReplaceDocumentAsync(existingDocId, doc, contentToSync, ct);
+                // Content differs: overwrite the whole document in place, guarded by the change
+                // vector we just compared against. A full-document PUT drops stale properties
+                // ($type included) exactly as the old delete + create did, but the document is
+                // never absent and a concurrent edit fails the write instead of being clobbered.
+                string? newId = await _ravenService.ReplaceDocumentAsync(
+                    existingDocId, existingChangeVector, doc, contentToSync, ct);
                 sw.Stop();
                 _logger.LogInformation("Replaced: {Identifier}", doc.Identifier);
-                return SyncResult.Succeeded(doc, SyncAction.Recreated, newId, duration: sw.Elapsed);
+                return SyncResult.Succeeded(doc, SyncAction.Replaced, newId, duration: sw.Elapsed);
             }
         }
         catch (Exception ex)
         {
             sw.Stop();
             _logger.LogError(ex, "Sync failed: {Path}", doc.RelativePath);
-            return SyncResult.Failed(doc, existingDocId == null ? SyncAction.Created : SyncAction.Patched, ex.Message, ex, sw.Elapsed);
+            return SyncResult.Failed(doc, existingDocId == null ? SyncAction.Created : SyncAction.Replaced, ex.Message, ex, sw.Elapsed);
         }
     }
 
@@ -260,7 +269,7 @@ public class DocumentSyncService(
             // If we don't have the RavenDB document ID, look it up
             if (string.IsNullOrEmpty(ravenDocumentId))
             {
-                (string? foundDocId, _) = await _ravenService.FindDocumentAsync(doc, ct);
+                (string? foundDocId, _, _) = await _ravenService.FindDocumentAsync(doc, ct);
                 ravenDocumentId = foundDocId;
             }
 
@@ -420,6 +429,18 @@ public class DocumentSyncService(
             .Where(kvp => kvp.Value.LayoutId == scopedLayoutId)
             .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
     }
+
+    /// <summary>
+    /// Pure decision helper: does this result mark its document as having a local file, for
+    /// orphan detection? True for every static-collection file that was read, whether or not its
+    /// write succeeded. An orphan is a stored document with no local file, and a failed write
+    /// (for example a replace refused because the document changed after it was compared) must
+    /// not make the document look orphaned, or <c>--clean</c> would delete it. A file that could
+    /// not be read carries no identifier, so it is not tracked.
+    /// </summary>
+    internal static bool CountsAsLocalFile(SyncResult result) =>
+        result.Document.DocumentType.IsStaticCollection()
+        && !string.IsNullOrEmpty(result.Document.Identifier);
 
     /// <summary>
     /// Composite orphan-tracking key: a document's identity for orphan detection is
@@ -644,74 +665,50 @@ public class DocumentSyncService(
     }
 
     /// <summary>
-    /// Compares two JSON documents for equality (ignoring timestamps and $type metadata).
+    /// Pure decision helper: does the stored document already hold what this sync would write?
+    /// True means the write is skipped. Extracted <c>internal static</c> so the equality rules are
+    /// unit-testable without RavenDB.
+    ///
+    /// <list type="bullet">
+    ///   <item><description>Only the root <c>@metadata</c> is exempt: it is server-managed, and a file's copy (identity files name their id there) is not content. Everything else counts. Until issue #24 this check also ignored <c>$type</c> and the <c>createdDateTime</c> / <c>lastUpdatedDateTime</c> timestamps at every depth; that was harmless only while the check never matched. Live, it would keep a stored <c>$type</c> artifact forever and silently skip timestamp-only edits, which files do make (hand-maintained policy timestamps). Nothing stamps those fields at sync time any more.</description></item>
+    ///   <item><description>Object key ORDER is significant. The write path preserves file order, so an untouched file always matches, and a reorder-only edit is a real change for any consumer that iterates keys.</description></item>
+    ///   <item><description>Leaf values compare by value, not spelling. The write path normalizes numbers (<c>1.50</c> is stored as <c>1.5</c>, <c>1e3</c> as <c>1000.0</c>), so a textual compare would rewrite such a file on every sync without ever converging.</description></item>
+    /// </list>
     /// </summary>
-    private static bool ContentEquals(JsonObject? a, JsonObject? b)
+    internal static bool ContentEquals(JsonObject? stored, JsonObject? candidate)
     {
-        if (a == null && b == null) return true;
-        if (a == null || b == null) return false;
+        if (stored == null && candidate == null) return true;
+        if (stored == null || candidate == null) return false;
 
-        // Clone and remove metadata fields for comparison
-        JsonObject aCopy = a.DeepClone().AsObject();
-        JsonObject bCopy = b.DeepClone().AsObject();
-
-        RemoveMetadata(aCopy);
-        RemoveMetadata(bCopy);
-
-        return aCopy.ToJsonString() == bCopy.ToJsonString();
+        return PropertiesEquivalent(
+            stored.Where(property => property.Key != "@metadata"),
+            candidate.Where(property => property.Key != "@metadata"));
     }
 
     /// <summary>
-    /// Recursively removes timestamp and $type metadata from a JSON object.
+    /// Structural equality for <see cref="ContentEquals"/>: objects need the same keys in the same
+    /// order, arrays the same elements in the same order, and leaves compare by value.
     /// </summary>
-    private static void RemoveMetadata(JsonObject obj)
+    private static bool JsonEquivalent(JsonNode? a, JsonNode? b) => (a, b) switch
     {
-        // Remove top-level metadata
-        obj.Remove("createdDateTime");
-        obj.Remove("lastUpdatedDateTime");
-        obj.Remove("@metadata");
-        obj.Remove("$type");
+        (null, null) => true,
+        (JsonObject x, JsonObject y) => PropertiesEquivalent(x, y),
+        (JsonArray x, JsonArray y) => x.Count == y.Count
+            && x.Zip(y).All(pair => JsonEquivalent(pair.First, pair.Second)),
+        (JsonValue x, JsonValue y) => JsonNode.DeepEquals(x, y),
+        _ => false
+    };
 
-        // Recursively process nested objects and arrays
-        foreach (KeyValuePair<string, JsonNode?> kvp in obj.ToList())
-        {
-            if (kvp.Value is JsonObject nested)
-            {
-                RemoveMetadata(nested);
-            }
-            else if (kvp.Value is JsonArray array)
-            {
-                RemoveMetadataFromArray(array);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Recursively removes $type metadata from a JSON array and unwraps $values arrays.
-    /// </summary>
-    private static void RemoveMetadataFromArray(JsonArray array)
+    private static bool PropertiesEquivalent(
+        IEnumerable<KeyValuePair<string, JsonNode?>> a,
+        IEnumerable<KeyValuePair<string, JsonNode?>> b)
     {
-        for (int i = 0; i < array.Count; i++)
-        {
-            JsonNode? item = array[i];
-            if (item is JsonObject nested)
-            {
-                // Check if this is a wrapped array ({ "$type": "...", "$values": [...] })
-                if (nested.ContainsKey("$values") && nested.ContainsKey("$type"))
-                {
-                    // This shouldn't happen at array element level, but handle it anyway
-                    RemoveMetadata(nested);
-                }
-                else
-                {
-                    RemoveMetadata(nested);
-                }
-            }
-            else if (item is JsonArray nestedArray)
-            {
-                RemoveMetadataFromArray(nestedArray);
-            }
-        }
+        List<KeyValuePair<string, JsonNode?>> left = [.. a];
+        List<KeyValuePair<string, JsonNode?>> right = [.. b];
+
+        return left.Count == right.Count
+            && left.Zip(right).All(pair => pair.First.Key == pair.Second.Key
+                && JsonEquivalent(pair.First.Value, pair.Second.Value));
     }
 
     private void LogBatchSummary(SyncBatchResult batch, int fileCount)
@@ -752,7 +749,11 @@ public class DocumentSyncService(
         if (identities > 0) parts.Add($"{identities} identities");
 
         string summary = parts.Count > 0 ? string.Join(", ", parts) : "0 documents";
-        _logger.LogInformation("[check] {Summary} synced in {Duration:F1}s", summary, batch.TotalDuration.TotalSeconds);
+        // The unchanged count makes real drift readable at a glance: a sync with nothing to do
+        // reports every document unchanged instead of rewriting them all (issue #11).
+        _logger.LogInformation(
+            "[check] {Summary} synced in {Duration:F1}s ({Unchanged} unchanged)",
+            summary, batch.TotalDuration.TotalSeconds, batch.UnchangedCount);
 
         if (batch.FailedCount > 0)
         {

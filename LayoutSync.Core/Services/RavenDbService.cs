@@ -15,6 +15,7 @@ using Raven.Client.Documents.Operations;
 using Raven.Client.Documents.Session;
 using Raven.Client.Exceptions;
 using Raven.Client.Json.Serialization.NewtonsoftJson;
+using Sparrow.Json;
 
 namespace LayoutSync.Services;
 
@@ -68,7 +69,8 @@ public class RavenDbService : IDisposable
         // for an @id that already exists on the server (from a concurrent
         // writer — another LayoutSync, a human editing in RavenDB Studio)
         // throws ConcurrencyException instead of silently overwriting.
-        // CreateDocumentAsync / ReplaceDocumentAsync catch and re-try once.
+        // CreateDocumentAsync catches and re-tries once; ReplaceDocumentAsync
+        // writes against the change vector it compared and fails on a mismatch.
         UseOptimisticConcurrency = true,
 
         // CRITICAL: Prevent CLR type name storage in @metadata
@@ -104,7 +106,22 @@ public class RavenDbService : IDisposable
   /// Looks up a document by identifier (for entities) or id (for identities).
   /// For identities, uses direct document ID load since ID is in @metadata.@id, not a top-level field.
   /// </summary>
-  public async Task<(string? DocumentId, JsonObject? Document)> FindDocumentAsync(
+  /// <returns>
+  /// The document id, the stored document exactly as persisted (including <c>@metadata</c>), and
+  /// its change vector — the version <see cref="ReplaceDocumentAsync"/> writes against, so a
+  /// document modified after it was compared is never silently overwritten. All null when absent.
+  /// </returns>
+  /// <remarks>
+  /// Documents are read as raw <see cref="BlittableJsonReaderObject"/>, never as <c>object</c>.
+  /// With no CLR type stored (<c>FindClrTypeName</c> returns null above), <c>object</c>
+  /// materializes a Newtonsoft <c>JObject</c>; System.Text.Json then serializes each of its
+  /// <c>JValue</c> leaves as <c>[]</c> (it enumerates JToken children), and the client adds a
+  /// phantom <c>Id</c> property. Every stored document came back as
+  /// <c>{"identifier":[],...,"Id":[]}</c>, so the sync's equality check could never match and
+  /// every document was deleted and recreated on every sync (issue #24). The blittable is the
+  /// stored JSON verbatim — values, key order and <c>@metadata</c> intact.
+  /// </remarks>
+  public async Task<(string? DocumentId, JsonObject? Document, string? ChangeVector)> FindDocumentAsync(
     SyncDocument doc,
     CancellationToken ct = default
   )
@@ -118,7 +135,7 @@ public class RavenDbService : IDisposable
     if (string.IsNullOrEmpty(lookupValue))
     {
       _logger.LogWarning("Cannot lookup document without identifier/id");
-      return (null, null);
+      return (null, null, null);
     }
 
     try
@@ -127,19 +144,17 @@ public class RavenDbService : IDisposable
       // since identities don't have a top-level "id" field in the document
       if (doc.DocumentType == DocumentType.Identity)
       {
-        object? loaded = await session.LoadAsync<object>(lookupValue, ct);
+        BlittableJsonReaderObject? loaded = await session.LoadAsync<BlittableJsonReaderObject>(lookupValue, ct);
         if (loaded == null)
         {
           _logger.LogDebug("Identity not found by id: {Id}", lookupValue);
-          return (null, null);
+          return (null, null, null);
         }
 
         string? docId = session.Advanced.GetDocumentId(loaded);
-        string json = System.Text.Json.JsonSerializer.Serialize(loaded);
-        JsonObject? jsonObj = JsonNode.Parse(json)?.AsObject();
 
         _logger.LogDebug("Found identity by id: {DocumentId}", docId);
-        return (docId, jsonObj);
+        return (docId, ToJsonObject(loaded), session.Advanced.GetChangeVectorFor(loaded));
       }
 
       // For entities, query by identifier field.
@@ -158,15 +173,15 @@ public class RavenDbService : IDisposable
       bool scopeByLayoutId = doc.DocumentType.StampsLayoutId() && !string.IsNullOrEmpty(doc.LayoutId);
       string query = BuildEntityLookupQuery(collection, scopeByLayoutId);
 
-      IAsyncRawDocumentQuery<object> results = session
-        .Advanced.AsyncRawQuery<object>(query)
+      IAsyncRawDocumentQuery<BlittableJsonReaderObject> results = session
+        .Advanced.AsyncRawQuery<BlittableJsonReaderObject>(query)
         .AddParameter("lookupValue", lookupValue);
       if (scopeByLayoutId)
       {
         results = results.AddParameter("layoutId", doc.LayoutId!);
       }
 
-      List<object> documents = await results.ToListAsync(ct);
+      List<BlittableJsonReaderObject> documents = await results.ToListAsync(ct);
 
       if (documents.Count == 0)
       {
@@ -174,19 +189,20 @@ public class RavenDbService : IDisposable
           "Document not found: identifier={LookupValue}",
           lookupValue
         );
-        return (null, null);
+        return (null, null, null);
       }
 
       // Map to (docId, JsonObject) tuples so the duplicate-detection helper can stay pure.
+      // Change vectors ride alongside, keyed by doc id, for whichever match the helper picks.
       List<(string DocId, JsonObject? Json)> mapped = [];
-      foreach (object item in documents)
+      Dictionary<string, string?> changeVectors = [];
+      foreach (BlittableJsonReaderObject item in documents)
       {
         string? itemDocId = session.Advanced.GetDocumentId(item);
-        string itemJson = System.Text.Json.JsonSerializer.Serialize(item);
-        JsonObject? itemJsonObj = JsonNode.Parse(itemJson)?.AsObject();
         if (!string.IsNullOrEmpty(itemDocId))
         {
-          mapped.Add((itemDocId, itemJsonObj));
+          mapped.Add((itemDocId, ToJsonObject(item)));
+          changeVectors[itemDocId] = session.Advanced.GetChangeVectorFor(item);
         }
       }
 
@@ -202,7 +218,10 @@ public class RavenDbService : IDisposable
         DuplicateEntityIdentifierCount++;
       }
 
-      return (resolved.DocumentId, resolved.Document);
+      string? changeVector = resolved.DocumentId is null
+        ? null
+        : changeVectors.GetValueOrDefault(resolved.DocumentId);
+      return (resolved.DocumentId, resolved.Document, changeVector);
     }
     catch (Exception ex)
     {
@@ -211,9 +230,17 @@ public class RavenDbService : IDisposable
         "Error looking up document: {LookupValue}",
         lookupValue
       );
-      return (null, null);
+      return (null, null, null);
     }
   }
+
+  /// <summary>
+  /// Pure helper: converts a stored document to a <see cref="JsonObject"/> by parsing the
+  /// blittable's own JSON text, which is lossless (see <see cref="FindDocumentAsync"/>'s remarks
+  /// for why a CLR round-trip is not). Keeps key order and <c>@metadata</c>, adds nothing.
+  /// </summary>
+  internal static JsonObject? ToJsonObject(BlittableJsonReaderObject document) =>
+    JsonNode.Parse(document.ToString())?.AsObject();
 
   /// <summary>
   /// Pure helper: builds the RavenDB RQL used by <see cref="FindDocumentAsync"/> to locate a
@@ -310,7 +337,7 @@ public class RavenDbService : IDisposable
   /// </summary>
   /// <param name="doc">The sync document metadata.</param>
   /// <param name="content">The document content to store.</param>
-  /// <param name="existingDocId">Optional: existing @id to preserve (for replace operations).</param>
+  /// <param name="existingDocId">Optional: the @id to create under (the file's id under --preserve-ids); a fresh NanoID otherwise.</param>
   /// <param name="ct">Cancellation token.</param>
   public async Task<string?> CreateDocumentAsync(
     SyncDocument doc,
@@ -511,22 +538,52 @@ public class RavenDbService : IDisposable
   }
 
   /// <summary>
-  /// Replaces an entire document (delete + create with same @id).
+  /// Replaces an entire document in place: one PUT of the full body at the same @id.
   /// </summary>
+  /// <remarks>
+  /// A full-document PUT drops every property the new content lacks — stale <c>$type</c>
+  /// artifacts included, the reason this path used to delete and re-create (8052cd9) — without
+  /// the delete. Delete + create ran as two transactions, so the document was absent in between
+  /// (readers could find nothing mid-sync) and each document fired a delete plus a put on the
+  /// RavenDB Changes API.
+  ///
+  /// <paramref name="expectedChangeVector"/> is the version the caller compared against: RavenDB
+  /// rejects the PUT with <see cref="ConcurrencyException"/> if anything modified the document
+  /// since, so a concurrent edit is surfaced instead of silently overwritten. Deliberately not
+  /// retried (unlike <see cref="CreateDocumentAsync"/>): a retry would re-apply this content over
+  /// a version it never compared. The next sync re-reads and re-compares instead. Null disables
+  /// the check.
+  /// </remarks>
   public async Task<string?> ReplaceDocumentAsync(
     string documentId,
+    string? expectedChangeVector,
     SyncDocument doc,
     JsonObject newContent,
     CancellationToken ct = default
   )
   {
+    string collection = doc.DocumentType.GetCollection();
+
     try
     {
-      // Delete old
-      await DeleteDocumentAsync(documentId, ct);
+      using IAsyncDocumentSession session = _store.OpenAsyncSession();
+      ExpandoObject entity = System.Text.Json.JsonSerializer.Deserialize<ExpandoObject>(newContent.ToJsonString(), ExpandoSerializerOptions)
+        ?? new ExpandoObject();
 
-      // Create new with same @id to preserve references
-      return await CreateDocumentAsync(doc, newContent, existingDocId: documentId, ct: ct);
+      await session.StoreAsync(entity, expectedChangeVector, documentId, ct);
+      IMetadataDictionary metadata = session.Advanced.GetMetadataFor(entity);
+      metadata["@collection"] = collection;
+      await session.SaveChangesAsync(ct);
+
+      _logger.LogInformation("Replaced document: {DocumentId} in {Collection}", documentId, collection);
+      return documentId;
+    }
+    catch (ConcurrencyException ex)
+    {
+      _logger.LogWarning(
+        "Document {DocumentId} in {Collection} changed after it was compared, so it was not overwritten. Re-run the sync (or save the file again in watch mode) to re-compare. {Message}",
+        documentId, collection, ex.Message);
+      throw;
     }
     catch (Exception ex)
     {
