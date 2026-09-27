@@ -19,8 +19,12 @@ namespace LayoutSync.Mcp;
 ///
 /// Configuration:
 /// <list type="bullet">
-///   <item><c>LAYOUTSYNC_LAYOUTS_PATH</c> (env var, required) — absolute path to the
-///         <c>layouts/</c> directory. The server refuses to start without it.</item>
+///   <item><c>LAYOUTSYNC_LAYOUTS_PATH</c> (env var, required) — path to the
+///         <c>layouts/</c> directory; a relative value resolves against the directory the
+///         client launched the server in. The server refuses to start without it. This is
+///         only the DEFAULT target: every tool also accepts a <c>layoutsPath</c> argument
+///         that overrides it per call, for sessions editing a different git worktree than
+///         the one the server was launched in (issue #29, <see cref="LayoutsPathProvider"/>).</item>
 /// </list>
 ///
 /// Once running, the server registers under the name "layoutsync" in <c>.mcp.json</c>
@@ -57,14 +61,19 @@ public static class Program
             builder.Services.AddSingleton<ManifestMutationService>();
 
             // MCP server with stdio transport. WithTools<T> registers each tool class.
+            // The instructions carry the one fact no static tool description can: the
+            // concrete default path, so an agent can compare it with the checkout it is
+            // editing before its first call (issue #29).
             builder.Services
-                .AddMcpServer()
+                .AddMcpServer(options => options.ServerInstructions = BuildServerInstructions(layoutsPath))
                 .WithStdioServerTransport()
                 .WithTools<ManifestTools>()
                 .WithTools<ManifestReadTools>();
 
             using IHost host = builder.Build();
-            Log.Information("LayoutSync MCP server starting. layouts: {Path}", layoutsPath);
+            Log.Information(
+                "LayoutSync MCP server starting. Default layouts: {Path} (tools accept a per-call layoutsPath override).",
+                layoutsPath);
             await host.RunAsync();
             return 0;
         }
@@ -94,9 +103,10 @@ public static class Program
                 + "Set it to the absolute path of your layouts/ directory in .mcp.json's env block.");
         }
 
-        string resolved = Path.IsPathRooted(raw)
-            ? raw
-            : Path.GetFullPath(raw, Directory.GetCurrentDirectory());
+        // GetFullPath normalizes absolute input too (separators, "..", trailing slash), so
+        // the default echoes in manifestPath in the same form as a per-call layoutsPath.
+        string resolved = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(raw, Directory.GetCurrentDirectory()));
 
         if (!Directory.Exists(resolved))
         {
@@ -106,11 +116,15 @@ public static class Program
 
         return resolved;
     }
-}
 
-/// <summary>
-/// Holds the resolved <c>layouts/</c> path for injection into tool classes. A trivial
-/// wrapper rather than a primitive string so DI can disambiguate it from other strings
-/// in the container.
-/// </summary>
-public sealed record LayoutsPathProvider(string Path);
+    /// <summary>
+    /// Server instructions sent to the client during the MCP handshake. Clients such as
+    /// Claude Code surface them to the model as standing context.
+    /// </summary>
+    internal static string BuildServerInstructions(string defaultLayoutsPath)
+        => $"The manifest tools default to this layouts directory: {defaultLayoutsPath}. It belongs "
+           + "to the checkout this server was launched in (normally where the session started), which "
+           + "is not necessarily the checkout you are editing. When you edit a different git worktree, "
+           + "pass that worktree's layouts/ directory as layoutsPath on every manifest tool call, and "
+           + "check the manifestPath in each response.";
+}

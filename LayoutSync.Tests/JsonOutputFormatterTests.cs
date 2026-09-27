@@ -20,11 +20,26 @@ public class JsonOutputFormatterTests
 
         Assert.Equal("manifest set-route", envelope["command"]?.GetValue<string>());
         Assert.Equal("dirt-life", envelope["layoutId"]?.GetValue<string>());
+        Assert.True(envelope.ContainsKey("manifestPath"));
         Assert.True(envelope["dryRun"]?.GetValue<bool>());
         Assert.True(envelope["success"]?.GetValue<bool>());
         Assert.IsType<JsonArray>(envelope["changes"]);
         Assert.IsType<JsonArray>(envelope["warnings"]);
         Assert.IsType<JsonArray>(envelope["errors"]);
+    }
+
+    [Fact]
+    public void Format_EchoesManifestPath()
+    {
+        string manifestPath = Path.Combine("layouts", "dirt-life", "manifests", "layout-manifest.json");
+        MutationResult result = new(Success: true, Changes: [], Errors: [], Warnings: [])
+        {
+            ManifestPath = manifestPath,
+        };
+
+        JsonObject envelope = JsonOutputFormatter.Format("manifest set-route", "dirt-life", false, result);
+
+        Assert.Equal(manifestPath, envelope["manifestPath"]?.GetValue<string>());
     }
 
     [Fact]

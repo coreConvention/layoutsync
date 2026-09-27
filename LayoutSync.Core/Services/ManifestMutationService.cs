@@ -37,6 +37,15 @@ public class ManifestMutationService(
     private readonly ILogger<ManifestMutationService> _logger = logger;
 
     /// <summary>
+    /// The single source of truth for where a layout's manifest lives:
+    /// <c>{layoutsPath}/{layoutId}/manifests/layout-manifest.json</c>. Matches LayoutSync's
+    /// discovery convention in <see cref="LocalFileService"/>. Public so read-only callers
+    /// (the MCP inspection tools) resolve — and echo — exactly the file this service mutates.
+    /// </summary>
+    public static string GetManifestPath(string layoutsPath, string layoutId)
+        => Path.Combine(layoutsPath, layoutId, "manifests", "layout-manifest.json");
+
+    /// <summary>
     /// Convenience wrapper for single-route mutations. Equivalent to
     /// <see cref="ApplyBatchAsync"/> with a one-element list and <see cref="BatchErrorMode.Abort"/>.
     /// </summary>
@@ -67,6 +76,10 @@ public class ManifestMutationService(
         bool dryRun,
         CancellationToken ct = default)
     {
+        // Resolved first so every result below — including the early error returns —
+        // reports which file it targeted.
+        string manifestPath = GetManifestPath(layoutsPath, layoutId);
+
         // 1. Pre-flight checks for self-conflicting patches (e.g. --patch-main and
         //    --remove-patch main on the same route). These aren't validation errors
         //    against manifest state — they're contradictions in the input itself, so
@@ -87,13 +100,11 @@ public class ManifestMutationService(
                 Success: false,
                 Changes: [],
                 Errors: topLevelErrors,
-                Warnings: []);
+                Warnings: [])
+            { ManifestPath = manifestPath };
         }
 
-        // 2. Load the manifest. The path convention matches LayoutSync's existing
-        //    discovery in LocalFileService.DiscoverFiles (manifests live under
-        //    layouts/{layoutId}/manifests/).
-        string manifestPath = Path.Combine(layoutsPath, layoutId, "manifests", "layout-manifest.json");
+        // 2. Load the manifest (path convention: see GetManifestPath).
         SyncDocument? manifestDoc = await _fileService.ReadDocumentAsync(manifestPath, layoutsPath);
         if (manifestDoc?.Content is not JsonObject manifest)
         {
@@ -101,7 +112,8 @@ public class ManifestMutationService(
                 Success: false,
                 Changes: [],
                 Errors: [$"Manifest not found or unparseable at {manifestPath}."],
-                Warnings: []);
+                Warnings: [])
+            { ManifestPath = manifestPath };
         }
 
         // 3. Validate. The validator only inspects state — it doesn't mutate.
@@ -162,7 +174,23 @@ public class ManifestMutationService(
         // 6. Persist (unless dry-run or nothing actually changed).
         if (anyApplied && !dryRun)
         {
-            await _fileService.WriteDocumentAsync(manifestPath, manifest);
+            try
+            {
+                await _fileService.WriteDocumentAsync(manifestPath, manifest);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Reported as a result, not an exception, so the failure still names the
+                // file (issue #29) — an escaping exception reaches MCP clients as a generic
+                // "An error occurred" message. Same shape as the not-found result above:
+                // nothing was written, so there are no changes to report.
+                return new MutationResult(
+                    Success: false,
+                    Changes: [],
+                    Errors: [$"Failed to write {manifestPath}: {ex.Message}"],
+                    Warnings: [])
+                { ManifestPath = manifestPath };
+            }
             _logger.LogInformation(
                 "Manifest mutation applied: {AppliedCount} route(s), {SkippedCount} skipped.",
                 changes.Count(c => c.Status == RouteChangeStatus.Applied),
@@ -174,7 +202,8 @@ public class ManifestMutationService(
             Success: !anyAborted,
             Changes: changes,
             Errors: [],
-            Warnings: []);
+            Warnings: [])
+        { ManifestPath = manifestPath };
     }
 
     /// <summary>

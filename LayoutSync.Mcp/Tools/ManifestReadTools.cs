@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using LayoutSync.Configuration;
 using LayoutSync.Models;
 using LayoutSync.Services;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace LayoutSync.Mcp.Tools;
@@ -13,6 +14,10 @@ namespace LayoutSync.Mcp.Tools;
 /// hand and eyeballing it. Each tool reads the manifest fresh on each call —
 /// no caching — because the file may have changed between calls (e.g. a sibling
 /// mutation tool just ran).
+///
+/// Every response — errors included — names the <c>manifestPath</c> it read, and each
+/// tool accepts the same optional <c>layoutsPath</c> override as the mutation tools
+/// (issue #29, <see cref="LayoutsPathProvider"/>).
 /// </summary>
 [McpServerToolType]
 public sealed class ManifestReadTools(
@@ -26,12 +31,16 @@ public sealed class ManifestReadTools(
     [Description(
         "List every route declared in a layout's manifest, with its structural section and "
         + "the slots that have content. Returns a JSON object: "
-        + "{ layoutId, manifestPath, routes: [{ route, structuralSection, slots: [...] }] }.")]
+        + "{ layoutId, manifestPath, routes: [{ route, structuralSection, slots: [...] }] }."
+        + LayoutsPathProvider.ReadToolNote)]
     public async Task<string> ManifestListRoutes(
         [Description("Layout id (e.g. 'dirt-life').")]
-        string layoutId)
+        string layoutId,
+
+        [Description(LayoutsPathProvider.ParameterDescription)]
+        string? layoutsPath = null)
     {
-        JsonObject manifest = await LoadManifestAsync(layoutId);
+        (string manifestPath, JsonObject manifest) = await LoadManifestAsync(layoutId, layoutsPath);
 
         JsonArray routes = [];
         if (manifest["routeConfigs"] is JsonObject routeConfigs)
@@ -66,23 +75,28 @@ public sealed class ManifestReadTools(
         return new JsonObject
         {
             ["layoutId"] = layoutId,
-            ["manifestPath"] = ManifestPath(layoutId),
+            ["manifestPath"] = manifestPath,
             ["routes"] = routes,
         }.ToJsonString(JsonOutputFormatter.PrettyOptions);
     }
 
     [McpServerTool(Name = "manifest_get_route")]
     [Description(
-        "Get the full route configuration for a single route key. Returns the verbatim "
-        + "routeConfigs[route] object, or { found: false } if the route is not declared.")]
+        "Get the full route configuration for a single route key. Returns "
+        + "{ layoutId, manifestPath, route, found, config } where config is the verbatim "
+        + "routeConfigs[route] object; found is false (and config absent) if the route is not declared."
+        + LayoutsPathProvider.ReadToolNote)]
     public async Task<string> ManifestGetRoute(
         [Description("Layout id (e.g. 'dirt-life').")]
         string layoutId,
 
         [Description("Route key to look up, e.g. '/events/my-rsvps'.")]
-        string route)
+        string route,
+
+        [Description(LayoutsPathProvider.ParameterDescription)]
+        string? layoutsPath = null)
     {
-        JsonObject manifest = await LoadManifestAsync(layoutId);
+        (string manifestPath, JsonObject manifest) = await LoadManifestAsync(layoutId, layoutsPath);
 
         if (manifest["routeConfigs"] is not JsonObject routeConfigs
             || routeConfigs[route] is not JsonObject routeConfig)
@@ -90,6 +104,7 @@ public sealed class ManifestReadTools(
             return new JsonObject
             {
                 ["layoutId"] = layoutId,
+                ["manifestPath"] = manifestPath,
                 ["route"] = route,
                 ["found"] = false,
             }.ToJsonString(JsonOutputFormatter.PrettyOptions);
@@ -98,6 +113,7 @@ public sealed class ManifestReadTools(
         return new JsonObject
         {
             ["layoutId"] = layoutId,
+            ["manifestPath"] = manifestPath,
             ["route"] = route,
             ["found"] = true,
             ["config"] = routeConfig.DeepClone(),
@@ -108,12 +124,16 @@ public sealed class ManifestReadTools(
     [Description(
         "List every section declared under entities.sections in a layout's manifest. "
         + "Use this to discover the valid section identifiers for manifest_set_route / "
-        + "manifest_apply_batch — picking from this list guarantees no validation typo.")]
+        + "manifest_apply_batch — picking from this list guarantees no validation typo."
+        + LayoutsPathProvider.ReadToolNote)]
     public async Task<string> ManifestListSections(
         [Description("Layout id (e.g. 'dirt-life').")]
-        string layoutId)
+        string layoutId,
+
+        [Description(LayoutsPathProvider.ParameterDescription)]
+        string? layoutsPath = null)
     {
-        JsonObject manifest = await LoadManifestAsync(layoutId);
+        (string manifestPath, JsonObject manifest) = await LoadManifestAsync(layoutId, layoutsPath);
 
         JsonArray sections = [];
         if (manifest["entities"] is JsonObject entities
@@ -135,23 +155,36 @@ public sealed class ManifestReadTools(
         return new JsonObject
         {
             ["layoutId"] = layoutId,
-            ["manifestPath"] = ManifestPath(layoutId),
+            ["manifestPath"] = manifestPath,
             ["sections"] = sections,
         }.ToJsonString(JsonOutputFormatter.PrettyOptions);
     }
 
-    private async Task<JsonObject> LoadManifestAsync(string layoutId)
+    /// <summary>
+    /// Resolves the target checkout and loads the layout's manifest from it. A missing or
+    /// unparseable manifest raises <see cref="McpException"/> — not
+    /// <see cref="FileNotFoundException"/>, whose message the SDK would replace with a
+    /// generic one — so the error still names the path that was tried. When that path came
+    /// from the server default, the message also says how to point at another checkout
+    /// (e.g. a layout that so far exists only in the caller's worktree).
+    /// </summary>
+    private async Task<(string ManifestPath, JsonObject Manifest)> LoadManifestAsync(
+        string layoutId,
+        string? layoutsPath)
     {
-        string manifestPath = ManifestPath(layoutId);
-        SyncDocument? doc = await _fileService.ReadDocumentAsync(manifestPath, _pathProvider.Path);
+        ResolvedLayoutsPath target = _pathProvider.Resolve(layoutsPath);
+        string manifestPath = target.ManifestPath(layoutId);
+
+        SyncDocument? doc = await _fileService.ReadDocumentAsync(manifestPath, target.LayoutsPath);
         if (doc?.Content is not JsonObject manifest)
         {
-            throw new FileNotFoundException(
-                $"Manifest not found or unparseable at {manifestPath}.", manifestPath);
+            string hint = target.IsExplicit
+                ? string.Empty
+                : " This is the server's default layouts directory (the checkout it was launched in); "
+                  + "if the layout lives in another checkout, pass its layouts/ directory as layoutsPath.";
+            throw new McpException($"Manifest not found or unparseable at {manifestPath}.{hint}");
         }
-        return manifest;
-    }
 
-    private string ManifestPath(string layoutId)
-        => Path.Combine(_pathProvider.Path, layoutId, "manifests", "layout-manifest.json");
+        return (manifestPath, manifest);
+    }
 }

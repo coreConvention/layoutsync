@@ -1,8 +1,12 @@
+using System.ComponentModel;
+using System.Reflection;
 using System.Text.Json.Nodes;
 using LayoutSync.Mcp;
 using LayoutSync.Mcp.Tools;
 using LayoutSync.Services;
 using Microsoft.Extensions.Logging.Abstractions;
+using ModelContextProtocol;
+using ModelContextProtocol.Server;
 using Xunit;
 
 namespace LayoutSync.Tests;
@@ -186,6 +190,252 @@ public class McpToolsTests : IDisposable
         }
     }
 
+    // ───── target checkout: layoutsPath + manifestPath echo (issue #29) ─────
+    //
+    // Scenario under test: the server was launched in checkout A (_layoutsPath, the
+    // default) while the session edits checkout B. Without layoutsPath every call
+    // silently targeted A; these tests pin that B is reachable, that A stays untouched
+    // when B is named, and that every response says which file it used.
+
+    [Fact]
+    public async Task ManifestSetRoute_WithLayoutsPath_WritesThatCheckoutAndLeavesDefaultUntouched()
+    {
+        WriteFixture();
+        string otherLayouts = WriteFixtureInOtherCheckout();
+        ManifestTools tools = new(_mutationService, _pathProvider);
+
+        string output = await tools.ManifestSetRoute(
+            layoutId: LayoutId,
+            route: "/events",
+            structuralSection: "full-width-layout",
+            layoutsPath: Path.GetDirectoryName(otherLayouts)); // checkout-root form
+
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+        Assert.True(envelope["success"]?.GetValue<bool>());
+        Assert.Equal(ManifestPathIn(otherLayouts), envelope["manifestPath"]?.GetValue<string>());
+        Assert.Empty(envelope["warnings"]!.AsArray());
+        Assert.Contains("full-width-layout", File.ReadAllText(ManifestPathIn(otherLayouts)));
+        Assert.Equal(StandardFixture, File.ReadAllText(ManifestPathIn(_layoutsPath)));
+    }
+
+    [Fact]
+    public async Task ManifestApplyBatch_WithLayoutsPath_WritesThatCheckoutAndLeavesDefaultUntouched()
+    {
+        WriteFixture();
+        string otherLayouts = WriteFixtureInOtherCheckout();
+        ManifestTools tools = new(_mutationService, _pathProvider);
+
+        string output = await tools.ManifestApplyBatch(
+            layoutId: LayoutId,
+            patches: [new ManifestTools.BatchPatch(Route: "/events", MainSections: ["my-rsvps-list"])],
+            layoutsPath: otherLayouts); // layouts-directory form
+
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+        Assert.True(envelope["success"]?.GetValue<bool>());
+        Assert.Equal(ManifestPathIn(otherLayouts), envelope["manifestPath"]?.GetValue<string>());
+        Assert.Empty(envelope["warnings"]!.AsArray());
+        Assert.Contains("my-rsvps-list", File.ReadAllText(ManifestPathIn(otherLayouts)));
+        Assert.Equal(StandardFixture, File.ReadAllText(ManifestPathIn(_layoutsPath)));
+    }
+
+    [Fact]
+    public async Task ManifestSetRoute_WithoutLayoutsPath_EchoesDefaultAndWarnsBeforeWriting()
+    {
+        WriteFixture();
+        ManifestTools tools = new(_mutationService, _pathProvider);
+
+        string output = await tools.ManifestSetRoute(
+            layoutId: LayoutId,
+            route: "/events",
+            structuralSection: "full-width-layout",
+            dryRun: true);
+
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+        string defaultManifest = ManifestPathIn(_layoutsPath);
+        Assert.Equal(defaultManifest, envelope["manifestPath"]?.GetValue<string>());
+        string warning = Assert.Single(envelope["warnings"]!.AsArray())!.GetValue<string>();
+        Assert.Contains("layoutsPath was not passed", warning);
+        Assert.Contains($"targeted {defaultManifest}", warning);
+    }
+
+    [Fact]
+    public async Task ManifestApplyBatch_WithoutLayoutsPath_RealWrite_WarningSaysTheFileWasWritten()
+    {
+        WriteFixture();
+        ManifestTools tools = new(_mutationService, _pathProvider);
+
+        string output = await tools.ManifestApplyBatch(
+            layoutId: LayoutId,
+            patches: [new ManifestTools.BatchPatch(Route: "/events", StructuralSection: "full-width-layout")]);
+
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+        string defaultManifest = ManifestPathIn(_layoutsPath);
+        Assert.Equal(defaultManifest, envelope["manifestPath"]?.GetValue<string>());
+        string warning = Assert.Single(envelope["warnings"]!.AsArray())!.GetValue<string>();
+        Assert.Contains($"wrote to {defaultManifest}", warning);
+    }
+
+    [Fact]
+    public async Task ManifestSetRoute_ManifestMissingInNamedCheckout_ReportsThePathItTried()
+    {
+        WriteFixture();
+        string emptyLayouts = Path.Combine(_tempRoot, "checkout-without-layout", "layouts");
+        Directory.CreateDirectory(emptyLayouts);
+        ManifestTools tools = new(_mutationService, _pathProvider);
+
+        string output = await tools.ManifestSetRoute(
+            layoutId: LayoutId,
+            route: "/events",
+            structuralSection: "full-width-layout",
+            layoutsPath: emptyLayouts);
+
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+        Assert.False(envelope["success"]?.GetValue<bool>());
+        Assert.Equal(ManifestPathIn(emptyLayouts), envelope["manifestPath"]?.GetValue<string>());
+        Assert.Equal(StandardFixture, File.ReadAllText(ManifestPathIn(_layoutsPath)));
+    }
+
+    [FactWhenFilePermissionsEnforced]
+    public async Task ManifestSetRoute_WriteFailure_EnvelopeNamesPathAndWarningDoesNotClaimAWrite()
+    {
+        WriteFixture();
+        string defaultManifest = ManifestPathIn(_layoutsPath);
+        File.SetAttributes(defaultManifest, FileAttributes.ReadOnly);
+        try
+        {
+            ManifestTools tools = new(_mutationService, _pathProvider);
+
+            string output = await tools.ManifestSetRoute(
+                layoutId: LayoutId, route: "/events", structuralSection: "full-width-layout");
+
+            JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+            Assert.False(envelope["success"]?.GetValue<bool>());
+            Assert.Equal(defaultManifest, envelope["manifestPath"]?.GetValue<string>());
+            Assert.Contains($"Failed to write {defaultManifest}",
+                Assert.Single(envelope["errors"]!.AsArray())!.GetValue<string>());
+            Assert.Contains($"targeted {defaultManifest}",
+                Assert.Single(envelope["warnings"]!.AsArray())!.GetValue<string>());
+        }
+        finally
+        {
+            File.SetAttributes(defaultManifest, FileAttributes.Normal);
+        }
+    }
+
+    [Fact]
+    public async Task MutationTools_RelativeLayoutsPath_AreRejectedBeforeAnyWrite()
+    {
+        WriteFixture();
+        ManifestTools tools = new(_mutationService, _pathProvider);
+
+        await Assert.ThrowsAsync<McpException>(() => tools.ManifestSetRoute(
+            layoutId: LayoutId, route: "/events", structuralSection: "full-width-layout", layoutsPath: "layouts"));
+        await Assert.ThrowsAsync<McpException>(() => tools.ManifestApplyBatch(
+            layoutId: LayoutId,
+            patches: [new ManifestTools.BatchPatch(Route: "/events", StructuralSection: "full-width-layout")],
+            layoutsPath: "layouts"));
+
+        Assert.Equal(StandardFixture, File.ReadAllText(ManifestPathIn(_layoutsPath)));
+    }
+
+    [Fact]
+    public async Task ManifestListRoutes_WithLayoutsPath_ReadsThatCheckout()
+    {
+        WriteFixture();
+        string otherLayouts = WriteFixtureInOtherCheckout(
+            StandardFixture.Replace("\"/events\"", "\"/only-in-other-worktree\""));
+        ManifestReadTools tools = new(_fileService, _pathProvider);
+
+        JsonObject fromDefault = JsonNode.Parse(await tools.ManifestListRoutes(LayoutId))!.AsObject();
+        JsonObject fromOther = JsonNode.Parse(await tools.ManifestListRoutes(LayoutId, otherLayouts))!.AsObject();
+
+        Assert.Equal(ManifestPathIn(_layoutsPath), fromDefault["manifestPath"]?.GetValue<string>());
+        Assert.Equal("/events", fromDefault["routes"]![0]!["route"]?.GetValue<string>());
+        Assert.Equal(ManifestPathIn(otherLayouts), fromOther["manifestPath"]?.GetValue<string>());
+        Assert.Equal("/only-in-other-worktree", fromOther["routes"]![0]!["route"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ManifestListSections_WithLayoutsPath_EchoesThatCheckout()
+    {
+        WriteFixture();
+        string otherLayouts = WriteFixtureInOtherCheckout();
+        ManifestReadTools tools = new(_fileService, _pathProvider);
+
+        JsonObject envelope = JsonNode.Parse(await tools.ManifestListSections(LayoutId, otherLayouts))!.AsObject();
+
+        Assert.Equal(ManifestPathIn(otherLayouts), envelope["manifestPath"]?.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("/events", true)]
+    [InlineData("/nonexistent", false)]
+    public async Task ManifestGetRoute_EchoesManifestPath_WhetherOrNotRouteIsFound(string route, bool expectedFound)
+    {
+        WriteFixture();
+        ManifestReadTools tools = new(_fileService, _pathProvider);
+
+        JsonObject envelope = JsonNode.Parse(await tools.ManifestGetRoute(LayoutId, route))!.AsObject();
+
+        Assert.Equal(expectedFound, envelope["found"]?.GetValue<bool>());
+        Assert.Equal(ManifestPathIn(_layoutsPath), envelope["manifestPath"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ReadTools_MissingManifestAtDefault_ErrorNamesPathAndHowToOverride()
+    {
+        // No fixture: the layout exists only in "some other checkout".
+        ManifestReadTools tools = new(_fileService, _pathProvider);
+
+        McpException ex = await Assert.ThrowsAsync<McpException>(() => tools.ManifestListRoutes(LayoutId));
+
+        Assert.Contains(ManifestPathIn(_layoutsPath), ex.Message);
+        Assert.Contains("layoutsPath", ex.Message);
+    }
+
+    [Fact]
+    public async Task ReadTools_MissingManifestAtNamedCheckout_ErrorNamesPathWithoutDefaultHint()
+    {
+        string emptyLayouts = Path.Combine(_tempRoot, "checkout-without-layout", "layouts");
+        Directory.CreateDirectory(emptyLayouts);
+        ManifestReadTools tools = new(_fileService, _pathProvider);
+
+        McpException ex = await Assert.ThrowsAsync<McpException>(
+            () => tools.ManifestListSections(LayoutId, emptyLayouts));
+
+        Assert.Contains(ManifestPathIn(emptyLayouts), ex.Message);
+        Assert.DoesNotContain("server's default", ex.Message);
+    }
+
+    /// <summary>
+    /// Guard for future tools (e.g. the config-block tools proposed in #21): every MCP
+    /// manifest tool must accept an optional <c>layoutsPath</c> and say so in its
+    /// description, or a session editing another worktree has no way to aim it.
+    /// </summary>
+    [Fact]
+    public void EveryTool_AcceptsOptionalLayoutsPath_AndDescribesIt()
+    {
+        MethodInfo[] toolMethods = typeof(ManifestTools).Assembly.GetTypes()
+            .Where(t => t.GetCustomAttribute<McpServerToolTypeAttribute>() is not null)
+            .SelectMany(t => t.GetMethods())
+            .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
+            .ToArray();
+
+        Assert.Equal(5, toolMethods.Length);
+        foreach (MethodInfo method in toolMethods)
+        {
+            ParameterInfo? parameter = method.GetParameters().SingleOrDefault(p => p.Name == "layoutsPath");
+            Assert.True(parameter is not null, $"{method.Name} has no layoutsPath parameter.");
+            Assert.Equal(typeof(string), parameter.ParameterType);
+            Assert.True(parameter.HasDefaultValue && parameter.DefaultValue is null,
+                $"{method.Name}: layoutsPath must be optional (default null).");
+
+            string description = method.GetCustomAttribute<DescriptionAttribute>()?.Description ?? "";
+            Assert.Contains("layoutsPath", description);
+            Assert.Contains("manifestPath", description);
+        }
+    }
+
     private void WriteFixture()
     {
         string manifestDir = Path.Combine(_layoutsPath, LayoutId, "manifests");
@@ -194,6 +444,22 @@ public class McpToolsTests : IDisposable
             Path.Combine(manifestDir, "layout-manifest.json"),
             StandardFixture);
     }
+
+    /// <summary>
+    /// Creates a second checkout ("worktree B") next to the default one and writes a
+    /// manifest into it. Returns B's <c>layouts/</c> directory.
+    /// </summary>
+    private string WriteFixtureInOtherCheckout(string content = StandardFixture)
+    {
+        string otherLayouts = Path.Combine(_tempRoot, "other-worktree", "layouts");
+        string manifestDir = Path.Combine(otherLayouts, LayoutId, "manifests");
+        Directory.CreateDirectory(manifestDir);
+        File.WriteAllText(Path.Combine(manifestDir, "layout-manifest.json"), content);
+        return otherLayouts;
+    }
+
+    private static string ManifestPathIn(string layoutsPath)
+        => Path.Combine(layoutsPath, LayoutId, "manifests", "layout-manifest.json");
 
     private const string StandardFixture = """
         {

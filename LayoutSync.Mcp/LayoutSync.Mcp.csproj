@@ -26,4 +26,9 @@
          provides the MCP transport + tool surface. -->
     <ProjectReference Include="..\LayoutSync.Core\LayoutSync.Core.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Test assembly can check internal helpers (server instructions, warning text) directly. -->
+    <InternalsVisibleTo Include="LayoutSync.Tests" />
+  </ItemGroup>
 </Project>
