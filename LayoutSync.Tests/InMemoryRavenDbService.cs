@@ -17,9 +17,10 @@ namespace LayoutSync.Tests;
 /// </summary>
 /// <remarks>
 /// The base constructor builds a real, never-used DocumentStore; initializing one opens no
-/// connection, so the unroutable URL is never dialed.
+/// connection, so the unroutable URL is never dialed. Not sealed: a test overrides one primitive
+/// to make a write fail (e.g. a replace refused by a concurrent edit, issue #36).
 /// </remarks>
-internal sealed class InMemoryRavenDbService(ILogger<RavenDbService>? logger = null)
+internal class InMemoryRavenDbService(ILogger<RavenDbService>? logger = null)
     : RavenDbService(
         logger ?? NullLogger<RavenDbService>.Instance,
         new RavenDbOptions { Url = "http://127.0.0.1:1", Database = "in-memory" })
