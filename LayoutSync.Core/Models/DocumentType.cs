@@ -56,9 +56,10 @@ public enum DocumentType
     Tag,
 
     /// <summary>
-    /// Workflow definition from workflows/ folder (repo root).
+    /// Workflow definition from a layout's workflows/ folder.
     /// Pre-wrapped with type "workflow-definition".
-    /// First-class app infrastructure - not layout-specific.
+    /// Written as authored (not stamped); a seed that declares a layoutId is attributed to that
+    /// layout, and tenant workflow starts look definitions up by identifier and layoutId.
     /// </summary>
     Workflow,
 
@@ -156,24 +157,48 @@ public static class DocumentTypeExtensions
         type is DocumentType.Section or DocumentType.Layout or DocumentType.Menu or DocumentType.Modal or DocumentType.Manifest or DocumentType.Tag or DocumentType.Workflow or DocumentType.WritePolicy or DocumentType.ReadPolicy or DocumentType.EntityConfig or DocumentType.EmailTemplate or DocumentType.Theme;
 
     /// <summary>
-    /// Returns true for document types whose stored document carries a top-level
-    /// <c>layoutId</c> field, stamped from the layout directory name at sync time.
-    /// These are the per-tenant, layout-scoped collections. System collections
-    /// (sections, layouts, menus, modals, manifests, tags, workflows) are layout-agnostic
-    /// and carry NO <c>layoutId</c> field even though their source files live under a
-    /// layout directory — so this is intentionally narrower than
-    /// <see cref="IsStaticCollection"/>.
+    /// Returns true for document types whose stored <c>layoutId</c> is STAMPED from the layout
+    /// directory name at sync time, overwriting whatever the file says. The other collections
+    /// (sections, layouts, menus, modals, manifests, tags, workflows) are written as authored, so
+    /// they carry a <c>layoutId</c> exactly when their file declares one — this is intentionally
+    /// narrower than <see cref="IsStaticCollection"/>.
     /// </summary>
     /// <remarks>
-    /// Single source of truth for "does this document have a <c>layoutId</c> field". The sync
-    /// writer consults it to decide whether to STAMP the field
-    /// (<c>DocumentSyncService.SyncFileAsync</c>), and the lookup reader consults it to decide
-    /// whether to SCOPE the identifier query by <c>layoutId</c>
-    /// (<see cref="RavenDbService.FindDocumentAsync"/>). Keeping both on this one predicate
-    /// guarantees the write and the read never disagree: scoping a lookup by a field the
-    /// document does not carry would match zero rows and spuriously re-create the document on
-    /// every sync. See issue #16.
+    /// Consulted through <see cref="SyncDocument.IsLayoutIdStamped"/>, which the sync writer uses to
+    /// decide whether to stamp the field and <see cref="SyncDocument.StoredLayoutId"/> uses to
+    /// report the value the stored document ends up with — so the write and every read of that
+    /// value never disagree. See issues #16 and #28.
     /// </remarks>
     public static bool StampsLayoutId(this DocumentType type) =>
         type is DocumentType.Entity or DocumentType.WritePolicy or DocumentType.ReadPolicy or DocumentType.EntityConfig or DocumentType.EmailTemplate or DocumentType.Theme;
+
+    /// <summary>
+    /// Returns true for document types identified by (identifier, stored <c>layoutId</c>): each
+    /// layout may ship its own document under one identifier, and a lookup resolves only to the
+    /// document carrying the file's <see cref="SyncDocument.StoredLayoutId"/> — a document without
+    /// one matches only other documents without one. This mirrors how the platform reads these
+    /// collections (per tenant, by identifier and layoutId), so two layouts' same-identifier copies
+    /// stay two documents instead of the last writer taking over the other's (issues #16, #28).
+    /// </summary>
+    /// <remarks>
+    /// The exceptions: <see cref="DocumentType.Identity"/> is looked up by document id, and
+    /// <see cref="DocumentType.Manifest"/> by identifier alone — a manifest's identifier IS the
+    /// tenant key (the platform resolves tenants by it and fails closed when two equivalent ones
+    /// exist), so two layouts shipping one manifest identifier is a conflict to refuse, not two
+    /// documents to keep (the in-run collision check refuses it; see <c>DocumentClaims</c>). Any
+    /// future type is layout-scoped unless listed here, the tenant-isolating default.
+    /// </remarks>
+    public static bool IsLayoutScoped(this DocumentType type) =>
+        type is not (DocumentType.Identity or DocumentType.Manifest);
+
+    /// <summary>
+    /// Returns true for the layout-scoped types whose <c>layoutId</c> is authored rather than stamped.
+    /// Their lookups were identifier-only before issue #28, so a database can still hold documents
+    /// stored before their file declared a <c>layoutId</c>; a full sync run may let such a file adopt
+    /// its unattributed document instead of leaving it behind and creating a second one (see
+    /// <c>RavenDbService.AdoptionScope</c>). Stamped types have been strictly scoped since #16 and
+    /// never adopt.
+    /// </summary>
+    public static bool AdoptsUnattributedDocuments(this DocumentType type) =>
+        type.IsLayoutScoped() && !type.StampsLayoutId();
 }

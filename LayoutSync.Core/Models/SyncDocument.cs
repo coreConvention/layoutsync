@@ -29,7 +29,9 @@ public class SyncDocument
     public string? EntityType { get; set; }
 
     /// <summary>
-    /// The layout this document belongs to (e.g., "dirt-life").
+    /// The layout directory the source file lives in (e.g., "dirt-life"); null for the platform
+    /// theme catalogue. Set for EVERY file under a layout directory, whether or not the stored
+    /// document carries a <c>layoutId</c> — identity decisions use <see cref="StoredLayoutId"/>.
     /// </summary>
     public string? LayoutId { get; set; }
 
@@ -69,4 +71,33 @@ public class SyncDocument
     /// For entities: identifier. For identities: id.
     /// </summary>
     public string LookupKey => DocumentType == DocumentType.Identity ? Id ?? string.Empty : Identifier ?? string.Empty;
+
+    /// <summary>
+    /// True when sync stamps the layout directory onto the stored document as its <c>layoutId</c>
+    /// (overwriting whatever the file says). The platform theme catalogue has no layout directory,
+    /// so it is never stamped.
+    /// </summary>
+    public bool IsLayoutIdStamped => DocumentType.StampsLayoutId() && !string.IsNullOrEmpty(LayoutId);
+
+    /// <summary>
+    /// The <c>layoutId</c> the stored document carries, or <c>""</c> when it carries none: the
+    /// stamped directory when <see cref="IsLayoutIdStamped"/>, otherwise the file's own top-level
+    /// <c>layoutId</c> — every other document is written as authored, so that is what lands in the
+    /// database. Lookup, collision and orphan identity all key on this, never on
+    /// <see cref="LayoutId"/>: a section under <c>layouts/dirt-life/</c> whose file declares
+    /// <c>"layoutId": "dirt-life"</c> is stored WITH it, while one whose file declares none is
+    /// stored without one. Issues #16/#17 assumed non-stamped documents never carry the field,
+    /// which let two layouts' same-identifier sections share one document (#28) and made
+    /// <c>--clean</c> delete every section that declares one (#31).
+    /// </summary>
+    public string StoredLayoutId => IsLayoutIdStamped ? LayoutId! : ReadLayoutIdField(Content);
+
+    /// <summary>
+    /// Reads a top-level <c>layoutId</c> string; <c>""</c> when absent, JSON null, or not a string
+    /// (missing and empty are the same thing everywhere layoutIds are compared — see issue #13).
+    /// </summary>
+    public static string ReadLayoutIdField(JsonObject? content) =>
+        content?["layoutId"] is JsonValue value && value.TryGetValue(out string? layoutId)
+            ? layoutId
+            : string.Empty;
 }

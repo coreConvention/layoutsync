@@ -96,7 +96,7 @@ public class Program
 
         Option<bool> strictOption = new(
             aliases: ["--strict"],
-            description: "Exit non-zero (code 2) if any validator emits an offense during sync (duplicate entity identifiers, raw-NanoID authorship warnings). Detection only — nothing is auto-deleted. Intended for CI.")
+            description: "Exit non-zero (code 2) if the sync flagged anything: duplicate identifiers, document collisions (files that resolve to the same stored document; those files are never synced, with or without --strict), or seed-validator warnings (e.g. raw-NanoID authorship). Detection only — nothing is auto-deleted. Intended for CI.")
         { IsRequired = false };
 
         Option<bool> allowRemoteSyncOption = new(
@@ -205,10 +205,10 @@ public class Program
             Log.Information("Layout Sync Tool v1.0");
 
             // Scoped clean: --clean + --layout X is now SAFE because orphan detection filters
-            // candidates by the document's stamped layoutId. Documents that don't carry a
-            // layoutId field (sections, layouts, menus, modals, manifests, tags, workflows)
-            // are conservatively skipped from scoped runs — operators must run unscoped clean
-            // if they truly need to prune those collections. See issue #427.
+            // candidates by the layoutId each document is stored with (stamped, or declared by its
+            // file — issue #31). Documents stored WITHOUT a layoutId are conservatively skipped
+            // from scoped runs — operators must run unscoped clean if they truly need to prune
+            // those. See issue #427.
             //
             // The original rejection (issue #235) was the safe-by-default response to the
             // pre-filter implementation, which would have deleted *every* non-scoped document
@@ -218,7 +218,7 @@ public class Program
             if (args.Clean && !string.IsNullOrEmpty(args.Layout))
             {
                 Log.Information(
-                    "Scoped clean active: orphan deletion filtered to layoutId='{Layout}'. Documents without a layoutId (sections/layouts/menus/modals/manifests/tags/workflows) will be skipped — run unscoped --clean to prune those.",
+                    "Scoped clean active: orphan deletion filtered to layoutId='{Layout}'. Documents stored without a layoutId will be skipped — run unscoped --clean to prune those.",
                     args.Layout);
             }
 
@@ -426,42 +426,28 @@ public class Program
             // of the log stream also surfaces the non-localhost target. No-op for Local.
             targetGuard.EmitCompletionBanner(ravenOpts.Url, args.DryRun);
 
-            // --strict: fail the run with exit code 2 if any of the detection-only validators
-            // flagged something during sync. All of the following contribute to the same gate:
+            // --strict: fail the run with exit code 2 if anything detection-only was flagged during
+            // sync. All of the following contribute to the same gate (StrictModeGate):
             //   • duplicate entity identifiers (RavenDbService)
+            //   • document collisions — files resolving to one stored document (DocumentSyncService, #28)
             //   • raw-NanoID authorship warnings (SeedAuthorshipValidator, #308)
             //   • dangling / unpinned-target cross-references (SeedCrossReferenceValidator, #300)
             //   • dead/no-op widget props on sections (DeadWidgetPropValidator, #984)
             // Detection-only: none of these mutate state. Strict mode is the CI escalation hook.
-            RavenDbService ravenService = host.Services.GetRequiredService<RavenDbService>();
-            // Same singleton instances DocumentSyncService was injected with, so their counters
-            // reflect the sync that just ran. Looping here means a future validator joins the
-            // strict gate automatically — no per-validator if-block to add. See issue #7.
-            IEnumerable<ISeedValidator> validators = host.Services.GetServices<ISeedValidator>();
-
             if (args.Strict)
             {
-                bool hasDuplicates = ravenService.DuplicateEntityIdentifierCount > 0;
-                if (hasDuplicates)
-                {
-                    Log.Error(
-                        "--strict: {Count} duplicate entity identifier(s) detected during sync. See WARN lines above for document IDs. LayoutSync does not auto-delete entity duplicates; purge manually via RavenDB.",
-                        ravenService.DuplicateEntityIdentifierCount
-                    );
-                }
+                // Same singleton instances DocumentSyncService was injected with, so their counters
+                // reflect the sync that just ran.
+                RavenDbService ravenService = host.Services.GetRequiredService<RavenDbService>();
+                IReadOnlyList<string> offenses = StrictModeGate.Offenses(
+                    ravenService.DuplicateEntityIdentifierCount,
+                    syncService.DocumentCollisionCount,
+                    host.Services.GetServices<ISeedValidator>());
 
-                bool anyValidatorWarnings = false;
-                foreach (ISeedValidator validator in validators)
-                {
-                    if (validator.WarningCount > 0)
-                    {
-                        anyValidatorWarnings = true;
-                        Log.Error("--strict: {Count} {Detail}", validator.WarningCount, validator.StrictWarningDetail);
-                    }
-                }
+                foreach (string offense in offenses)
+                    Log.Error("{StrictOffense}", offense);
 
-                if (hasDuplicates || anyValidatorWarnings)
-                    return 2;
+                return StrictModeGate.ExitCodeFor(offenses);
             }
 
             return 0;

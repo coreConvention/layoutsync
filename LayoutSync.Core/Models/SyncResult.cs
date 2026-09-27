@@ -105,7 +105,7 @@ public class SyncResult
 /// </summary>
 public enum SyncAction
 {
-    /// <summary>Document was skipped (dry run, or the file could not be read).</summary>
+    /// <summary>Document was skipped (dry run, the file could not be read, or it was refused as a collision — issue #28).</summary>
     Skipped,
 
     /// <summary>New document was created in database.</summary>
