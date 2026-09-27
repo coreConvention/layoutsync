@@ -33,6 +33,14 @@ public class DocumentSyncService(
     private readonly CommandLineArgs _cliArgs = cliArgs;
 
     /// <summary>
+    /// Stored documents that two or more files collided on in the most recent
+    /// <see cref="SyncAllAsync"/> batch. Colliding files are refused (only the first of several
+    /// byte-identical copies is written), so no document is replaced twice in one run;
+    /// <c>--strict</c> turns a non-zero count into exit code 2. See issue #28.
+    /// </summary>
+    public int DocumentCollisionCount { get; private set; }
+
+    /// <summary>
     /// Syncs all files in the layouts directory.
     /// </summary>
     /// <param name="layoutsPath">Path to layouts directory.</param>
@@ -63,25 +71,48 @@ public class DocumentSyncService(
         Dictionary<string, HashSet<string>> syncedIdentifiers =
             BuildOrphanTracking(_cliArgs.ExcludeCollections);
 
-        IEnumerable<string> files = _fileService.DiscoverFiles(
-            layoutsPath, layout, _cliArgs.ExcludeCollections, _cliArgs.ExcludeLayouts);
+        // Read every file BEFORE the first write, so which file owns which stored document is
+        // settled for the whole run up front: files that declare the same document are refused
+        // whatever order they are discovered in — and discovery order differs between fresh CI
+        // checkouts, which is what made #28 flip from one sync to the next.
+        List<SyncDocument> docs = [];
         int fileCount = 0;
-
-        foreach (string filePath in files)
+        foreach (string filePath in _fileService.DiscoverFiles(
+            layoutsPath, layout, _cliArgs.ExcludeCollections, _cliArgs.ExcludeLayouts))
         {
             if (ct.IsCancellationRequested)
                 break;
 
             fileCount++;
-            SyncResult result = await SyncFileAsync(filePath, layoutsPath, dryRun, ct);
+            SyncDocument? doc = await _fileService.ReadDocumentAsync(filePath, layoutsPath);
+            if (doc == null)
+            {
+                batch.Results.Add(ReadFailure(filePath));
+                continue;
+            }
+
+            docs.Add(doc);
+        }
+
+        DocumentClaims claims = new(docs, await ReadOutsideScopeAsync(layoutsPath, layout, ct));
+        LogDeclaredCollisions(claims);
+
+        foreach (SyncDocument doc in docs)
+        {
+            if (ct.IsCancellationRequested)
+                break;
+
+            SyncResult result = await SyncDocumentAsync(doc, dryRun, claims, ct);
             batch.Results.Add(result);
 
             // Track synced document for orphan detection (static collections only). Key by
-            // (effective layoutId, identifier) — NOT identifier alone — so two layouts that
+            // (stored layoutId, identifier) — NOT identifier alone — so two layouts that
             // legitimately ship the same identifier in one collection are tracked independently
-            // (issue #17). effectiveLayoutId mirrors the STORED field: the stamped layoutId for
-            // per-tenant types, "" for layout-agnostic ones — matching what
-            // GetAllOrphanCandidatesAsync reads back (and the DynamicNullObject "" of issue #13).
+            // (issue #17). The layoutId must be the one the document is STORED with, because that
+            // is what GetAllOrphanCandidatesAsync reads back: keying non-stamped documents by ""
+            // made every section/manifest/... that declares a layoutId an orphan, which --clean
+            // then deleted (issue #31). Refused collision files count as local files too, so the
+            // document they declare is protected.
             if (CountsAsLocalFile(result))
             {
                 SyncDocument syncedDoc = result.Document;
@@ -89,14 +120,17 @@ public class DocumentSyncService(
                 string? identifier = syncedDoc.Identifier;
                 if (!string.IsNullOrEmpty(identifier) && syncedIdentifiers.ContainsKey(collection))
                 {
-                    string effectiveLayoutId =
-                        syncedDoc.DocumentType.StampsLayoutId() && !string.IsNullOrEmpty(syncedDoc.LayoutId)
-                            ? syncedDoc.LayoutId!
-                            : string.Empty;
-                    syncedIdentifiers[collection].Add(OrphanTrackingKey(effectiveLayoutId, identifier));
+                    syncedIdentifiers[collection].Add(OrphanTrackingKey(syncedDoc.StoredLayoutId, identifier));
+
+                    // A refused file never learned which stored document is its own. Where it could
+                    // have adopted an unattributed one, protect that too until the collision is fixed.
+                    if (claims.IsRefused(syncedDoc) && syncedDoc.DocumentType.AdoptsUnattributedDocuments())
+                        syncedIdentifiers[collection].Add(OrphanTrackingKey(string.Empty, identifier));
                 }
             }
         }
+
+        DocumentCollisionCount = claims.CollisionCount;
 
         // Always detect orphans in static collections (deletion is conditional on cleanOrphans flag)
         await DetectOrphansAsync(batch, syncedIdentifiers, cleanOrphans, dryRun, ct);
@@ -116,22 +150,91 @@ public class DocumentSyncService(
     }
 
     /// <summary>
-    /// Syncs a single file to RavenDB.
+    /// Reports each group of files that declare the same document identity, once, before any of
+    /// them is refused in the sync loop.
+    /// </summary>
+    private void LogDeclaredCollisions(DocumentClaims claims)
+    {
+        foreach ((IReadOnlyList<SyncDocument> group, bool identicalCopies) in claims.DeclaredCollisions)
+        {
+            SyncDocument first = group[0];
+            string identity = first.DocumentType == DocumentType.Identity
+                ? $"id '{first.Id}'"
+                : first.DocumentType.IsLayoutScoped()
+                    ? $"identifier '{first.Identifier}', layoutId {(first.StoredLayoutId.Length > 0 ? $"'{first.StoredLayoutId}'" : "(none)")}"
+                    : $"identifier '{first.Identifier}'";
+            string files = string.Join(", ", group.Select(doc => doc.RelativePath));
+
+            if (identicalCopies)
+            {
+                _logger.LogWarning(
+                    "Document collision: {Count} files declare the same {Collection} document ({Identity}) with identical content: {Files}. Only {SyncedFile} is synced; delete the copies. --strict fails the run (exit code 2). See issue #28.",
+                    group.Count, first.DocumentType.GetCollection(), identity, files, first.RelativePath);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Document collision: {Count} files declare the same {Collection} document ({Identity}) with different content: {Files}. None of them is synced this run, so the stored document keeps its current content. Give each file its own identifier. --strict fails the run (exit code 2). See issue #28.",
+                    group.Count, first.DocumentType.GetCollection(), identity, files);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Under <c>--layout</c>, reads the files an unscoped sync would also see (same exclusions), for
+    /// the adoption guard only: an unattributed document's rightful owner may live in another layout
+    /// (<see cref="DocumentClaims.AdoptionScopeFor"/>). Empty for an unscoped run, which already
+    /// read everything.
+    /// </summary>
+    private async Task<List<SyncDocument>> ReadOutsideScopeAsync(string layoutsPath, string? layout, CancellationToken ct)
+    {
+        List<SyncDocument> outside = [];
+        if (string.IsNullOrEmpty(layout))
+            return outside;
+
+        string scopedDirectory = Path.Combine(layoutsPath, layout) + Path.DirectorySeparatorChar;
+        foreach (string filePath in _fileService.DiscoverFiles(
+            layoutsPath, specificLayout: null, _cliArgs.ExcludeCollections, _cliArgs.ExcludeLayouts))
+        {
+            if (ct.IsCancellationRequested)
+                break;
+            if (filePath.StartsWith(scopedDirectory, StringComparison.Ordinal))
+                continue;
+
+            if (await _fileService.ReadDocumentAsync(filePath, layoutsPath) is { } doc)
+                outside.Add(doc);
+        }
+
+        return outside;
+    }
+
+    /// <summary>
+    /// Syncs a single file to RavenDB (watch mode). A lone file has no run to check ownership
+    /// against, so it gets neither collision detection nor the migration fallback to an unattributed
+    /// document — both need to know every other file in the run (<see cref="DocumentClaims"/>).
     /// </summary>
     public async Task<SyncResult> SyncFileAsync(string filePath, string layoutsPath, bool dryRun = false, CancellationToken ct = default)
     {
-        Stopwatch sw = Stopwatch.StartNew();
-
-        // Read local file
         SyncDocument? doc = await _fileService.ReadDocumentAsync(filePath, layoutsPath);
-        if (doc == null)
-        {
-            return SyncResult.Failed(
-                new SyncDocument { FilePath = filePath },
-                SyncAction.Skipped,
-                "Failed to read file"
-            );
-        }
+        return doc == null
+            ? ReadFailure(filePath)
+            : await SyncDocumentAsync(doc, dryRun, claims: null, ct);
+    }
+
+    private static SyncResult ReadFailure(string filePath) =>
+        SyncResult.Failed(
+            new SyncDocument { FilePath = filePath },
+            SyncAction.Skipped,
+            "Failed to read file"
+        );
+
+    /// <summary>
+    /// Syncs one already-read document. <paramref name="claims"/> is the batch's ownership record
+    /// (<see cref="SyncAllAsync"/>); null for a single-file sync.
+    /// </summary>
+    private async Task<SyncResult> SyncDocumentAsync(SyncDocument doc, bool dryRun, DocumentClaims? claims, CancellationToken ct)
+    {
+        Stopwatch sw = Stopwatch.StartNew();
 
         // Log human-readable ID warning
         if (doc.HasHumanReadableId)
@@ -149,15 +252,26 @@ public class DocumentSyncService(
         foreach (ISeedValidator validator in _validators)
             validator.Inspect(doc.DocumentType, doc.RelativePath, contentToSync);
 
+        // A file that shares its document identity with another file in this run is not written:
+        // whichever landed last would silently replace the other (issue #28); only the first of
+        // several byte-identical copies goes through. Refused AFTER the validators, which must
+        // still see every file (e.g. cross-reference accumulates declared ids from all of them).
+        // The group was reported once in LogDeclaredCollisions.
+        if (claims?.RefusalReason(doc) is { } refusal)
+        {
+            return SyncResult.Skipped(doc, refusal);
+        }
+
         // Inject layoutId for entity documents — entities must be scoped to a layout.
         // The layoutId is derived from the layout directory name (e.g., "layouts/dirt-life/" → "dirt-life").
         // We always overwrite layoutId in the content to ensure consistency with the directory name.
-        // System collections (sections, layouts, menus, modals, manifests, tags, workflows) are EXEMPT.
+        // System collections (sections, layouts, menus, modals, manifests, tags, workflows) are EXEMPT:
+        // they are written as authored, so they carry a layoutId exactly when their file declares one.
         // Themes have two flavors: layout-scoped overrides (LayoutId set, the resolver matches
         // request tenant context) and the platform catalogue (LayoutId null/empty, available to
-        // every tenant via /api/init). The null-guard below short-circuits stamping for the
-        // platform-scoped flavor so those documents stay layoutId-less.
-        if (doc.DocumentType.StampsLayoutId() && !string.IsNullOrEmpty(doc.LayoutId))
+        // every tenant via /api/init). IsLayoutIdStamped is false for the platform-scoped flavor so
+        // those documents stay layoutId-less.
+        if (doc.IsLayoutIdStamped)
         {
             contentToSync["layoutId"] = doc.LayoutId;
             _logger.LogDebug(
@@ -179,7 +293,17 @@ public class DocumentSyncService(
 
         // Look up in database
         (string? existingDocId, JsonObject? existingDoc, string? existingChangeVector) =
-            await _ravenService.FindDocumentAsync(doc, ct);
+            await _ravenService.FindDocumentAsync(doc, claims?.AdoptionScopeFor(doc), ct);
+
+        // Backstop for any other route by which two files could reach one stored document: the
+        // first file to resolve to it owns it for the rest of the run (issue #28).
+        if (existingDocId != null && claims != null && !claims.TryClaim(existingDocId, doc, out SyncDocument? owner))
+        {
+            _logger.LogWarning(
+                "Document collision: {Path} resolves to {Collection} document {DocumentId}, which {OwnerPath} already resolved to in this run. The later file is not synced, so the document is not replaced twice. --strict fails the run (exit code 2). See issue #28.",
+                doc.RelativePath, doc.DocumentType.GetCollection(), existingDocId, owner!.RelativePath);
+            return SyncResult.Skipped(doc, $"Collision: resolves to document {existingDocId}, already claimed by {owner.RelativePath}");
+        }
 
         // Compare BEFORE the dry-run branch so --dry-run is a true diff: "Would UPDATE" only when
         // the stored document actually differs, not for every existing document (issue #11).
@@ -266,7 +390,9 @@ public class DocumentSyncService(
 
         try
         {
-            // If we don't have the RavenDB document ID, look it up
+            // If we don't have the RavenDB document ID, look it up. The deleted file's content is
+            // gone, so its stored layoutId is unknown: layout-scoped types can only resolve an
+            // unattributed document here, never another layout's same-identifier document.
             if (string.IsNullOrEmpty(ravenDocumentId))
             {
                 (string? foundDocId, _, _) = await _ravenService.FindDocumentAsync(doc, ct);
@@ -408,7 +534,7 @@ public class DocumentSyncService(
     /// <list type="bullet">
     ///   <item><description>When <paramref name="scopedLayoutId"/> is null/empty, all candidates pass through (legacy unscoped behavior).</description></item>
     ///   <item><description>When <paramref name="scopedLayoutId"/> is set, only candidates whose <see cref="RavenDbService.OrphanCandidate.LayoutId"/> equals the scope are kept.</description></item>
-    ///   <item><description>Candidates with a null <c>LayoutId</c> are conservatively dropped under a scoped run — they belong to globally-shared collections (sections, layouts, menus, modals, manifests, tags, workflows) where the data model carries no tenant attribution, and a scoped operation must not delete documents it cannot prove belong to that tenant.</description></item>
+    ///   <item><description>Candidates with a null <c>LayoutId</c> are conservatively dropped under a scoped run — a document stored without a layoutId (never stamped, and its file declared none) carries no tenant attribution, and a scoped operation must not delete documents it cannot prove belong to that tenant. Non-stamped documents whose file DID declare the scope's layoutId are attributed and eligible (issue #31).</description></item>
     /// </list>
     ///
     /// See issue #427 (and the predecessor data-loss incident #235).
@@ -516,8 +642,8 @@ public class DocumentSyncService(
     ///   <item><description>When <paramref name="excludedLayouts"/> is empty, all candidates pass through.</description></item>
     ///   <item><description>Candidates whose <see cref="RavenDbService.OrphanCandidate.LayoutId"/> matches an excluded layout (Ordinal) are dropped.</description></item>
     ///   <item><description>Candidates with a null OR EMPTY <c>LayoutId</c> are ALSO dropped while any
-    ///   exclusion is active: most static collections (sections, layouts, menus, modals, manifests,
-    ///   tags, workflows) are never stamped with <c>layoutId</c>, so such a candidate cannot be proven
+    ///   exclusion is active: a document stored without a layoutId (never stamped, and its file
+    ///   declared none) cannot be proven
     ///   to lie OUTSIDE the excluded layout — deleting it under <c>--clean --exclude-layout X</c> could
     ///   destroy X's own documents. Mirrors the null-drop conservatism of
     ///   <see cref="FilterOrphansForScope"/>. Empty matters as much as null: RavenDB's dynamic
@@ -758,6 +884,13 @@ public class DocumentSyncService(
         if (batch.FailedCount > 0)
         {
             _logger.LogWarning("{Failed} sync operations failed", batch.FailedCount);
+        }
+
+        if (DocumentCollisionCount > 0)
+        {
+            _logger.LogWarning(
+                "{Count} document collision(s): see the 'Document collision' lines above for which files were not synced",
+                DocumentCollisionCount);
         }
 
         if (batch.HumanReadableIdCount > 0)

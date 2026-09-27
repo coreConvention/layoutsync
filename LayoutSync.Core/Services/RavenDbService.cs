@@ -23,6 +23,13 @@ namespace LayoutSync.Services;
 /// Service for interacting with RavenDB.
 /// Handles CRUD operations for entities and identities.
 /// </summary>
+/// <remarks>
+/// The storage primitives (<see cref="LoadByIdAsync"/>, <see cref="QueryByIdentifierAsync"/>,
+/// <see cref="CreateDocumentAsync"/>, <see cref="ReplaceDocumentAsync"/>, <see cref="DeleteDocumentAsync"/>,
+/// <see cref="GetAllOrphanCandidatesAsync"/>) are virtual so tests can substitute an in-memory
+/// store and drive the real lookup and sync decisions end to end. Everything that decides WHICH
+/// document a file maps to stays non-virtual.
+/// </remarks>
 public class RavenDbService : IDisposable
 {
   private readonly ILogger<RavenDbService> _logger;
@@ -103,9 +110,27 @@ public class RavenDbService : IDisposable
   }
 
   /// <summary>
-  /// Looks up a document by identifier (for entities) or id (for identities).
-  /// For identities, uses direct document ID load since ID is in @metadata.@id, not a top-level field.
+  /// Exact lookup, with no fallback to an unattributed document: what a single file can safely
+  /// resolve on its own (watch mode, deletions). See
+  /// <see cref="FindDocumentAsync(SyncDocument, AdoptionScope, CancellationToken)"/>.
   /// </summary>
+  public Task<(string? DocumentId, JsonObject? Document, string? ChangeVector)> FindDocumentAsync(
+    SyncDocument doc,
+    CancellationToken ct = default
+  ) => FindDocumentAsync(doc, adoption: null, ct);
+
+  /// <summary>
+  /// Looks up the stored document a local file maps to: by id for identities (the id lives in
+  /// @metadata.@id, not a top-level field), by identifier for everything else. Layout-scoped
+  /// types (<see cref="DocumentTypeExtensions.IsLayoutScoped"/>) are then narrowed to the
+  /// document carrying the file's <see cref="SyncDocument.StoredLayoutId"/> — see
+  /// <see cref="ResolveLayoutScopedLookup"/>.
+  /// </summary>
+  /// <param name="doc">The local file's document.</param>
+  /// <param name="adoption">Permission to fall back to an unattributed document; null disables it.
+  /// Only a full sync run can grant it, because only a run knows which documents its other files
+  /// claim (see <see cref="AdoptionScope"/>).</param>
+  /// <param name="ct">Cancellation token.</param>
   /// <returns>
   /// The document id, the stored document exactly as persisted (including <c>@metadata</c>), and
   /// its change vector — the version <see cref="ReplaceDocumentAsync"/> writes against, so a
@@ -123,11 +148,10 @@ public class RavenDbService : IDisposable
   /// </remarks>
   public async Task<(string? DocumentId, JsonObject? Document, string? ChangeVector)> FindDocumentAsync(
     SyncDocument doc,
+    AdoptionScope? adoption,
     CancellationToken ct = default
   )
   {
-    using IAsyncDocumentSession session = _store.OpenAsyncSession();
-
     // Route to correct collection based on document type
     string collection = doc.DocumentType.GetCollection();
     string lookupValue = doc.LookupKey;
@@ -144,46 +168,27 @@ public class RavenDbService : IDisposable
       // since identities don't have a top-level "id" field in the document
       if (doc.DocumentType == DocumentType.Identity)
       {
-        BlittableJsonReaderObject? loaded = await session.LoadAsync<BlittableJsonReaderObject>(lookupValue, ct);
-        if (loaded == null)
-        {
-          _logger.LogDebug("Identity not found by id: {Id}", lookupValue);
-          return (null, null, null);
-        }
-
-        string? docId = session.Advanced.GetDocumentId(loaded);
-
-        _logger.LogDebug("Found identity by id: {DocumentId}", docId);
-        return (docId, ToJsonObject(loaded), session.Advanced.GetChangeVectorFor(loaded));
+        return await LoadByIdAsync(lookupValue, ct);
       }
 
-      // For entities, query by identifier field.
+      // For everything else, fetch every document with the identifier — whatever its layoutId —
+      // and resolve in memory.
       // NOTE: Historical seed uploads have been known to leave multiple entity documents
       // with the same Identifier in the DB (see issue #282). Entity orphan cleanup is
       // intentionally disabled to protect user data, so we CANNOT auto-delete extras —
       // but we must at least detect and warn so these ghosts do not persist silently.
-      //
-      // Scope the lookup by layoutId for per-tenant document types (those that stamp a
-      // layoutId field — see DocumentType.StampsLayoutId). Without this, two layouts that
-      // declare documents with the SAME identifier in the SAME collection clobber each other
-      // on a shared-DB sync: the second layout's sync finds the first's document by identifier
-      // alone and replaces it in place (flipping its layoutId and content). Layout-agnostic
-      // documents (sections, manifests, platform themes, …) carry no layoutId field and are
-      // matched by identifier alone, exactly as before. See issue #16.
-      bool scopeByLayoutId = doc.DocumentType.StampsLayoutId() && !string.IsNullOrEmpty(doc.LayoutId);
-      string query = BuildEntityLookupQuery(collection, scopeByLayoutId);
+      IReadOnlyList<LookupCandidate> candidates = await QueryByIdentifierAsync(collection, lookupValue, ct);
 
-      IAsyncRawDocumentQuery<BlittableJsonReaderObject> results = session
-        .Advanced.AsyncRawQuery<BlittableJsonReaderObject>(query)
-        .AddParameter("lookupValue", lookupValue);
-      if (scopeByLayoutId)
+      DuplicateEntityLookupResult resolved = doc.DocumentType.IsLayoutScoped()
+        ? ResolveLayoutScopedLookup(collection, lookupValue, doc.StoredLayoutId, candidates, adoption, _logger)
+        : ResolveEntityLookup(collection, lookupValue, [.. candidates.Select(c => (c.DocumentId, c.Document))], _logger);
+
+      if (resolved.IsDuplicate)
       {
-        results = results.AddParameter("layoutId", doc.LayoutId!);
+        DuplicateEntityIdentifierCount++;
       }
 
-      List<BlittableJsonReaderObject> documents = await results.ToListAsync(ct);
-
-      if (documents.Count == 0)
+      if (resolved.DocumentId == null)
       {
         _logger.LogDebug(
           "Document not found: identifier={LookupValue}",
@@ -192,39 +197,14 @@ public class RavenDbService : IDisposable
         return (null, null, null);
       }
 
-      // Map to (docId, JsonObject) tuples so the duplicate-detection helper can stay pure.
-      // Change vectors ride alongside, keyed by doc id, for whichever match the helper picks.
-      List<(string DocId, JsonObject? Json)> mapped = [];
-      Dictionary<string, string?> changeVectors = [];
-      foreach (BlittableJsonReaderObject item in documents)
-      {
-        string? itemDocId = session.Advanced.GetDocumentId(item);
-        if (!string.IsNullOrEmpty(itemDocId))
-        {
-          mapped.Add((itemDocId, ToJsonObject(item)));
-          changeVectors[itemDocId] = session.Advanced.GetChangeVectorFor(item);
-        }
-      }
-
-      DuplicateEntityLookupResult resolved = ResolveEntityLookup(
-        collection,
-        lookupValue,
-        mapped,
-        _logger
-      );
-
-      if (resolved.IsDuplicate)
-      {
-        DuplicateEntityIdentifierCount++;
-      }
-
-      string? changeVector = resolved.DocumentId is null
-        ? null
-        : changeVectors.GetValueOrDefault(resolved.DocumentId);
+      // The change vector of whichever candidate was picked, for the guarded in-place replace.
+      string? changeVector = candidates.First(c => c.DocumentId == resolved.DocumentId).ChangeVector;
       return (resolved.DocumentId, resolved.Document, changeVector);
     }
     catch (Exception ex)
     {
+      // NOTE: reported as "not found", so the caller creates a document — a transient error can
+      // therefore mint a duplicate (issue #32).
       _logger.LogError(
         ex,
         "Error looking up document: {LookupValue}",
@@ -235,26 +215,175 @@ public class RavenDbService : IDisposable
   }
 
   /// <summary>
+  /// Storage primitive: loads one document by its id. Virtual — like the other storage
+  /// primitives — so tests can substitute an in-memory store and drive the real lookup and sync
+  /// decisions end to end; production has exactly one implementation.
+  /// </summary>
+  protected virtual async Task<(string? DocumentId, JsonObject? Document, string? ChangeVector)> LoadByIdAsync(
+    string id,
+    CancellationToken ct
+  )
+  {
+    using IAsyncDocumentSession session = _store.OpenAsyncSession();
+    BlittableJsonReaderObject? loaded = await session.LoadAsync<BlittableJsonReaderObject>(id, ct);
+    if (loaded == null)
+    {
+      _logger.LogDebug("Identity not found by id: {Id}", id);
+      return (null, null, null);
+    }
+
+    string? docId = session.Advanced.GetDocumentId(loaded);
+
+    _logger.LogDebug("Found identity by id: {DocumentId}", docId);
+    return (docId, ToJsonObject(loaded), session.Advanced.GetChangeVectorFor(loaded));
+  }
+
+  /// <summary>
+  /// Storage primitive: every document in <paramref name="collection"/> whose <c>identifier</c>
+  /// matches <paramref name="identifier"/> (RavenDB equality is case-insensitive), whatever its
+  /// <c>layoutId</c> — the caller resolves among them. Each carries its stored layoutId, read from
+  /// the lossless blittable, and its change vector. Virtual for in-memory test stores.
+  /// </summary>
+  protected virtual async Task<IReadOnlyList<LookupCandidate>> QueryByIdentifierAsync(
+    string collection,
+    string identifier,
+    CancellationToken ct
+  )
+  {
+    using IAsyncDocumentSession session = _store.OpenAsyncSession();
+    List<BlittableJsonReaderObject> documents = await session
+      .Advanced.AsyncRawQuery<BlittableJsonReaderObject>($"from {collection} where identifier = $lookupValue")
+      .AddParameter("lookupValue", identifier)
+      .ToListAsync(ct);
+
+    List<LookupCandidate> candidates = [];
+    foreach (BlittableJsonReaderObject item in documents)
+    {
+      string? itemDocId = session.Advanced.GetDocumentId(item);
+      if (string.IsNullOrEmpty(itemDocId))
+      {
+        continue;
+      }
+
+      JsonObject? json = ToJsonObject(item);
+      candidates.Add(new LookupCandidate(
+        itemDocId,
+        SyncDocument.ReadLayoutIdField(json),
+        json,
+        session.Advanced.GetChangeVectorFor(item)));
+    }
+
+    return candidates;
+  }
+
+  /// <summary>
   /// Pure helper: converts a stored document to a <see cref="JsonObject"/> by parsing the
-  /// blittable's own JSON text, which is lossless (see <see cref="FindDocumentAsync"/>'s remarks
-  /// for why a CLR round-trip is not). Keeps key order and <c>@metadata</c>, adds nothing.
+  /// blittable's own JSON text, which is lossless (see <see cref="FindDocumentAsync(SyncDocument, AdoptionScope, CancellationToken)"/>'s
+  /// remarks for why a CLR round-trip is not). Keeps key order and <c>@metadata</c>, adds nothing.
   /// </summary>
   internal static JsonObject? ToJsonObject(BlittableJsonReaderObject document) =>
     JsonNode.Parse(document.ToString())?.AsObject();
 
   /// <summary>
-  /// Pure helper: builds the RavenDB RQL used by <see cref="FindDocumentAsync"/> to locate a
-  /// non-identity document by its <c>identifier</c>. When <paramref name="scopeByLayoutId"/> is
-  /// true the query is additionally constrained by <c>layoutId</c> (the caller binds the
-  /// <c>$layoutId</c> parameter) so per-tenant documents that legitimately share an identifier
-  /// across layouts don't collide on a shared-DB sync. Extracted as <c>public static</c> — like
-  /// <see cref="ResolveEntityLookup"/> — so the scoping decision is unit-testable without a live
-  /// RavenDB session. See issue #16.
+  /// A stored document <see cref="FindDocumentAsync(SyncDocument, AdoptionScope, CancellationToken)"/>
+  /// can resolve to: its id, the <c>layoutId</c> it carries (<c>""</c> when none), its content as
+  /// read, and its change vector.
   /// </summary>
-  public static string BuildEntityLookupQuery(string collection, bool scopeByLayoutId) =>
-    scopeByLayoutId
-      ? $"from {collection} where identifier = $lookupValue and layoutId = $layoutId"
-      : $"from {collection} where identifier = $lookupValue";
+  public sealed record LookupCandidate(string DocumentId, string LayoutId, JsonObject? Document, string? ChangeVector = null);
+
+  /// <summary>
+  /// Permission for <see cref="ResolveLayoutScopedLookup"/> to fall back to an UNATTRIBUTED
+  /// document — one stored without a <c>layoutId</c> — when no document carries the file's
+  /// layoutId. This is the migration path for documents written before their file declared a
+  /// layoutId: without it, the first layout-scoped sync would leave the old document behind and
+  /// create a second one beside it (issue #28). A sync run grants it only to a file of a type that
+  /// newly scopes its lookup (<see cref="DocumentTypeExtensions.AdoptsUnattributedDocuments"/>),
+  /// and only when no file declares that identifier WITHOUT a layoutId — such a file is the
+  /// unattributed document's rightful owner. <see cref="ClaimedDocumentIds"/> are documents other
+  /// files already resolved to this run; they are never adopted.
+  /// </summary>
+  public sealed record AdoptionScope(IReadOnlySet<string> ClaimedDocumentIds);
+
+  /// <summary>
+  /// Pure helper: resolves a layout-scoped lookup among every document sharing the identifier.
+  /// Identity is (identifier, stored layoutId), so a document matches only when its layoutId
+  /// equals <paramref name="layoutId"/> — compared case-insensitively, like RavenDB query equality.
+  /// A document carrying ANOTHER layout's id is never matched: that is how two layouts' copies of
+  /// one identifier stay two documents instead of clobbering one (issues #16, #28).
+  /// <list type="number">
+  ///   <item><description>Exact: documents carrying <paramref name="layoutId"/> — the first wins,
+  ///   and more than one is a duplicate (<see cref="ResolveEntityLookup"/>). With an empty
+  ///   <paramref name="layoutId"/> (a file that declares none) only unattributed documents match,
+  ///   which is identifier-only matching for genuinely shared documents, minus the ability to
+  ///   capture a tenant's document.</description></item>
+  ///   <item><description>Adoption, only when <paramref name="adoption"/> is granted and the file has
+  ///   a layoutId: the unclaimed unattributed documents, first wins, more than one is a duplicate.
+  ///   The write re-attributes the adopted document to this layout.</description></item>
+  ///   <item><description>Otherwise nothing matches, and the caller creates the file's own
+  ///   document.</description></item>
+  /// </list>
+  /// </summary>
+  public static DuplicateEntityLookupResult ResolveLayoutScopedLookup(
+    string collection,
+    string lookupValue,
+    string layoutId,
+    IReadOnlyList<LookupCandidate> candidates,
+    AdoptionScope? adoption,
+    ILogger logger
+  )
+  {
+    List<(string DocId, JsonObject? Json)> exact =
+    [
+      .. candidates
+        .Where(c => string.Equals(c.LayoutId, layoutId, StringComparison.OrdinalIgnoreCase))
+        .Select(c => (c.DocumentId, c.Document)),
+    ];
+    if (exact.Count > 0)
+    {
+      return ResolveEntityLookup(collection, lookupValue, exact, logger);
+    }
+
+    if (adoption is not null && layoutId.Length > 0)
+    {
+      List<(string DocId, JsonObject? Json)> unattributed =
+      [
+        .. candidates
+          .Where(c => c.LayoutId.Length == 0 && !adoption.ClaimedDocumentIds.Contains(c.DocumentId))
+          .Select(c => (c.DocumentId, c.Document)),
+      ];
+      if (unattributed.Count > 0)
+      {
+        logger.LogWarning(
+          "Adopting unattributed document {DocumentId} ('{Identifier}' in {Collection}) for layoutId '{LayoutId}': it was stored without a layoutId, and this sync re-attributes it instead of creating a second document. See issue #28.",
+          unattributed[0].DocId,
+          lookupValue,
+          collection,
+          layoutId
+        );
+        return ResolveEntityLookup(collection, lookupValue, unattributed, logger);
+      }
+    }
+
+    if (candidates.Count > 0)
+    {
+      // Expected once per identifier on the first layout-scoped sync of a database where another
+      // layout's copy won the old identifier-only lookup; afterwards this layout's own document
+      // exists and matches exactly.
+      logger.LogInformation(
+        "No document for '{Identifier}' in {Collection} has layoutId {LayoutId}; the {Count} existing one(s) (layoutId {ExistingLayoutIds}) are left untouched and this file gets its own document.",
+        lookupValue,
+        collection,
+        DescribeLayoutId(layoutId),
+        candidates.Count,
+        string.Join(", ", candidates.Select(c => DescribeLayoutId(c.LayoutId)).Distinct())
+      );
+    }
+
+    return new DuplicateEntityLookupResult(null, null, IsDuplicate: false);
+  }
+
+  private static string DescribeLayoutId(string layoutId) =>
+    layoutId.Length > 0 ? $"'{layoutId}'" : "(none)";
 
   /// <summary>
   /// Result of <see cref="ResolveEntityLookup"/>: the first document (used as today) plus
@@ -339,7 +468,7 @@ public class RavenDbService : IDisposable
   /// <param name="content">The document content to store.</param>
   /// <param name="existingDocId">Optional: the @id to create under (the file's id under --preserve-ids); a fresh NanoID otherwise.</param>
   /// <param name="ct">Cancellation token.</param>
-  public async Task<string?> CreateDocumentAsync(
+  public virtual async Task<string?> CreateDocumentAsync(
     SyncDocument doc,
     JsonObject content,
     string? existingDocId = null,
@@ -445,11 +574,12 @@ public class RavenDbService : IDisposable
 
   /// <summary>
   /// Information about a candidate orphan returned by <see cref="GetAllOrphanCandidatesAsync"/>.
-  /// <see cref="LayoutId"/> is empty when the document does not stamp a <c>layoutId</c> field
-  /// (true for sections / layouts / menus / modals / manifests / tags / workflows). Layout-scoped
-  /// collections (WritePolicies, ReadPolicies, entity-configs, theme-definitions) populate it. Used by
-  /// orphan-scope filtering to keep <c>--clean</c> + <c>--layout</c> combos safe across tenants.
-  /// See issue #427.
+  /// <see cref="LayoutId"/> is the <c>layoutId</c> the stored document carries, empty when it
+  /// carries none: stamped for the per-tenant collections (WritePolicies, ReadPolicies,
+  /// entity-configs, email-templates, theme-definitions), and whatever the source file declared for
+  /// everything else — sections, manifests and the other non-stamped collections carry one exactly
+  /// when their file does (issue #31). Used by orphan-scope filtering to keep <c>--clean</c> +
+  /// <c>--layout</c> combos safe across tenants. See issue #427.
   /// </summary>
   /// <remarks>
   /// RavenDB's dynamic projection surfaces a MISSING <c>layoutId</c> as the empty string, never
@@ -463,7 +593,7 @@ public class RavenDbService : IDisposable
 
   /// <summary>
   /// Gets every document in a static collection as an <see cref="OrphanCandidate"/>
-  /// (identifier + stamped <c>layoutId</c>), keyed by its unique RavenDB document id.
+  /// (identifier + stored <c>layoutId</c>), keyed by its unique RavenDB document id.
   /// Used for orphan detection in static collections.
   /// </summary>
   /// <remarks>
@@ -475,7 +605,7 @@ public class RavenDbService : IDisposable
   /// <param name="collection">The RavenDB collection name (e.g., "Sections").</param>
   /// <param name="ct">Cancellation token.</param>
   /// <returns>Dictionary mapping document id to its <see cref="OrphanCandidate"/>.</returns>
-  public async Task<Dictionary<string, OrphanCandidate>> GetAllOrphanCandidatesAsync(
+  public virtual async Task<Dictionary<string, OrphanCandidate>> GetAllOrphanCandidatesAsync(
     string collection,
     CancellationToken ct = default
   )
@@ -518,7 +648,7 @@ public class RavenDbService : IDisposable
   /// <summary>
   /// Deletes a document from RavenDB.
   /// </summary>
-  public async Task<bool> DeleteDocumentAsync(string documentId, CancellationToken ct = default)
+  public virtual async Task<bool> DeleteDocumentAsync(string documentId, CancellationToken ct = default)
   {
     using IAsyncDocumentSession session = _store.OpenAsyncSession();
 
@@ -554,7 +684,7 @@ public class RavenDbService : IDisposable
   /// a version it never compared. The next sync re-reads and re-compares instead. Null disables
   /// the check.
   /// </remarks>
-  public async Task<string?> ReplaceDocumentAsync(
+  public virtual async Task<string?> ReplaceDocumentAsync(
     string documentId,
     string? expectedChangeVector,
     SyncDocument doc,
