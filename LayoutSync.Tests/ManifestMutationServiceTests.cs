@@ -358,7 +358,63 @@ public class ManifestMutationServiceTests : IDisposable
         Assert.Equal("/a~1b", ops[0]!["path"]?.GetValue<string>());
     }
 
+    [Fact]
+    public async Task SetRouteAsync_ManifestWithEmDashAndApostrophe_ChangesOnlyTheRouteLines()
+    {
+        // Issue #38: the write escaped the description's em dash and apostrophe and dropped
+        // the final newline, so adding one route rewrote lines nobody touched.
+        WriteFixture(AsWritten("""
+            {
+              "identifier": "test-layout",
+              "description": "Events — the organizer's page",
+              "entities": {
+                "sections": [
+                  {
+                    "identifier": "full-width-layout",
+                    "type": "ui-schema-section"
+                  }
+                ]
+              }
+            }
+            """));
+
+        MutationResult result = await _service.SetRouteAsync(
+            _layoutsPath,
+            LayoutId,
+            new RoutePatchInput(Route: "/events", StructuralSection: "full-width-layout"),
+            dryRun: false);
+
+        Assert.True(result.Success);
+        Assert.Equal(AsWritten("""
+            {
+              "identifier": "test-layout",
+              "description": "Events — the organizer's page",
+              "entities": {
+                "sections": [
+                  {
+                    "identifier": "full-width-layout",
+                    "type": "ui-schema-section"
+                  }
+                ]
+              },
+              "routeConfigs": {
+                "/events": {
+                  "structuralSection": "full-width-layout",
+                  "patches": []
+                }
+              }
+            }
+            """), File.ReadAllText(ManifestPath()));
+    }
+
     // ───── helpers ─────
+
+    /// <summary>
+    /// <paramref name="json"/> as the manifest writer lays it out on disk: its line endings
+    /// (<see cref="Environment.NewLine"/>) and exactly one final newline.
+    /// </summary>
+    private static string AsWritten(string json)
+        => json.ReplaceLineEndings(Environment.NewLine) + Environment.NewLine;
 
     private string ManifestPath()
         => Path.Combine(_layoutsPath, LayoutId, "manifests", "layout-manifest.json");

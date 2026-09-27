@@ -25,8 +25,9 @@ namespace LayoutSync.Services;
 /// Writes: the manifest goes through <see cref="LocalFileService"/>, exactly like
 /// <c>set-route</c>. A rename also rewrites the section file's own top-level
 /// <c>identifier</c> (unless asked not to) by splicing just that JSON token, so the rest of
-/// the file stays byte-for-byte identical. A System.Text.Json round-trip would re-escape
-/// characters such as <c>'</c>, <c>&lt;</c> and <c>&amp;</c> throughout the file. A rename
+/// the file stays byte-for-byte identical. A parse/serialize round-trip would rewrite the rest of
+/// the file too: whitespace and one-line arrays are reformatted, existing escapes are rewritten,
+/// and the final newline changes. A rename
 /// lands in both files or in neither: one whose section file cannot be updated is refused
 /// before anything is written, and if the section-file write fails after the manifest was
 /// written, the manifest's original bytes are put back. Section files are overwritten in
@@ -42,6 +43,12 @@ public class ManifestSectionRegistryService(
 
     /// <summary>The <c>type</c> every existing registry entry uses; the default for new entries.</summary>
     public const string DefaultSectionType = "ui-schema-section";
+
+    /// <summary>
+    /// Encodes a renamed identifier with the same encoder <see cref="LocalFileService"/> writes
+    /// the manifest with (issue #38), so the section file and the manifest spell it the same way.
+    /// </summary>
+    private static readonly JsonSerializerOptions IdentifierTokenOptions = new() { Encoder = LiteralJsonEncoder.Instance };
 
     /// <summary>JSON Pointer of the registry. Its subtree holds declarations, never references.</summary>
     private const string RegistryPointer = "/entities/sections";
@@ -729,7 +736,7 @@ public class ManifestSectionRegistryService(
     /// </summary>
     internal static byte[] ReplaceToken(byte[] content, IdentifierToken token, string replacement)
     {
-        byte[] encoded = JsonSerializer.SerializeToUtf8Bytes(replacement);
+        byte[] encoded = JsonSerializer.SerializeToUtf8Bytes(replacement, IdentifierTokenOptions);
         return [.. content[..token.Start], .. encoded, .. content[(token.Start + token.Length)..]];
     }
 

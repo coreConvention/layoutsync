@@ -11,6 +11,11 @@
       LayoutSync.* namespaces, not LayoutSync.Core.*.
     -->
     <RootNamespace>LayoutSync</RootNamespace>
+    <!--
+      Required by Services/LiteralJsonEncoder.cs: JavaScriptEncoder's abstract members take
+      char* parameters, so overriding them needs an unsafe context (issue #38).
+    -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>

@@ -756,6 +756,19 @@ public class ManifestSectionRegistryServiceTests : IDisposable
         Assert.Equal("""{"identifier":"renamed","type":"x"}""", Encoding.UTF8.GetString(replaced));
     }
 
+    [Fact]
+    public void ReplaceToken_WritesTheNewIdentifierLiterally()
+    {
+        // Issue #38: the manifest keeps these characters literal, so the spliced token must
+        // too, or a rename would spell the identifier differently in the two files.
+        byte[] json = """{"identifier":"old","type":"x"}"""u8.ToArray();
+
+        ManifestSectionRegistryService.IdentifierToken token = ManifestSectionRegistryService.FindTopLevelIdentifier(json)!;
+        byte[] replaced = ManifestSectionRegistryService.ReplaceToken(json, token, "café's+section");
+
+        Assert.Equal("""{"identifier":"café's+section","type":"x"}""", Encoding.UTF8.GetString(replaced));
+    }
+
     // ───── fixtures ─────
 
     private string ManifestPath()
