@@ -30,7 +30,18 @@ public sealed record MutationResult(
     bool Success,
     IReadOnlyList<RouteChange> Changes,
     IReadOnlyList<string> Errors,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings)
+{
+    /// <summary>
+    /// Absolute path of the <c>layout-manifest.json</c> the operation targeted — the file
+    /// that was read and (unless dry-run or aborted) written. Echoed in every JSON envelope
+    /// so a caller can confirm WHICH checkout was mutated: with several git worktrees on
+    /// disk, the same layout id resolves to a different file in each (issue #29). An
+    /// init-only property rather than a positional parameter so existing constructions stay
+    /// source-compatible; <c>null</c> only when a result is built without a target.
+    /// </summary>
+    public string? ManifestPath { get; init; }
+}
 
 /// <summary>
 /// Per-route record of what changed (or would have changed) during a manifest mutation.

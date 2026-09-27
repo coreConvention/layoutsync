@@ -13,10 +13,11 @@ namespace LayoutSync.Configuration;
 /// Envelope shape:
 /// <code>
 /// {
-///   "command":  "manifest set-route" | "manifest from-json",
-///   "dryRun":   true | false,
-///   "success":  true | false,
-///   "layoutId": "dirt-life",
+///   "command":      "manifest set-route" | "manifest from-json" | "manifest apply-batch",
+///   "layoutId":     "dirt-life",
+///   "manifestPath": "/abs/path/layouts/dirt-life/manifests/layout-manifest.json" | null,
+///   "dryRun":       true | false,
+///   "success":      true | false,
 ///   "changes": [
 ///     {
 ///       "route":  "/events/my-rsvps",
@@ -31,6 +32,10 @@ namespace LayoutSync.Configuration;
 ///   "errors":   [ "string", ... ]
 /// }
 /// </code>
+///
+/// <c>manifestPath</c> (issue #29) names the file the command read and wrote. With several
+/// git worktrees on disk the same <c>layoutId</c> maps to a different file in each, so
+/// the path is the only field that tells a caller which checkout was actually touched.
 /// </summary>
 public static class JsonOutputFormatter
 {
@@ -72,6 +77,7 @@ public static class JsonOutputFormatter
         {
             ["command"] = command,
             ["layoutId"] = layoutId,
+            ["manifestPath"] = result.ManifestPath,
             ["dryRun"] = dryRun,
             ["success"] = result.Success,
             ["changes"] = changes,

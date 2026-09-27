@@ -15,6 +15,13 @@ namespace LayoutSync.Mcp.Tools;
 /// Why not static methods (the EchoTool sample pattern)? These tools need DI access to
 /// <see cref="ManifestMutationService"/> and the resolved layouts path. The MCP C# SDK
 /// supports instance tool classes with constructor injection, which is the cleaner fit.
+///
+/// Target checkout (issue #29): each call resolves its <c>layouts/</c> directory through
+/// <see cref="LayoutsPathProvider.Resolve"/>. When the caller omits <c>layoutsPath</c>,
+/// the call still runs against the server's startup default — refusing would also block
+/// the correct common case, a session editing the checkout it was launched in — but the
+/// envelope gains a warning naming the file it targeted. Paired with the dry-run-first
+/// workflow, that surfaces a wrong-checkout target before anything is written.
 /// </summary>
 [McpServerToolType]
 public sealed class ManifestTools(
@@ -29,7 +36,8 @@ public sealed class ManifestTools(
         "Mutate a single route entry in a layout's layout-manifest.json. Creates the route if absent. "
         + "Returns a JSON envelope with the before/after snapshots, an RFC 6902 patch, and a per-route "
         + "status. Validates that all referenced section identifiers resolve to entries declared in "
-        + "entities.sections; typos produce a structured error with 'did you mean' suggestions.")]
+        + "entities.sections; typos produce a structured error with 'did you mean' suggestions."
+        + LayoutsPathProvider.WriteToolNote)]
     public async Task<string> ManifestSetRoute(
         [Description("Layout id (e.g. 'dirt-life').")]
         string layoutId,
@@ -51,8 +59,13 @@ public sealed class ManifestTools(
         string[]? removePatch = null,
 
         [Description("If true, compute the diff but do not write the manifest file. Default: false.")]
-        bool dryRun = false)
+        bool dryRun = false,
+
+        [Description(LayoutsPathProvider.ParameterDescription)]
+        string? layoutsPath = null)
     {
+        ResolvedLayoutsPath target = _pathProvider.Resolve(layoutsPath);
+
         bool removeMain = removePatch?.Contains("main") ?? false;
         bool removeSidebar = removePatch?.Contains("sidebar") ?? false;
 
@@ -65,13 +78,9 @@ public sealed class ManifestTools(
             RemoveSidebar: removeSidebar);
 
         MutationResult result = await _service.SetRouteAsync(
-            _pathProvider.Path, layoutId, patch, dryRun);
+            target.LayoutsPath, layoutId, patch, dryRun);
 
-        return JsonOutputFormatter.FormatAsString(
-            command: "manifest set-route",
-            layoutId: layoutId,
-            dryRun: dryRun,
-            result);
+        return FormatEnvelope("manifest set-route", layoutId, dryRun, target, result);
     }
 
     [McpServerTool(Name = "manifest_apply_batch")]
@@ -79,7 +88,8 @@ public sealed class ManifestTools(
         "Apply a batch of route patches against a layout's manifest atomically. "
         + "On any validation failure, behavior is governed by `onError`: 'abort' (default) rejects "
         + "the entire batch; 'skip' applies the valid patches and reports the invalid ones. "
-        + "Returns the same JSON envelope shape as manifest_set_route, with one entry per route.")]
+        + "Returns the same JSON envelope shape as manifest_set_route, with one entry per route."
+        + LayoutsPathProvider.WriteToolNote)]
     public async Task<string> ManifestApplyBatch(
         [Description("Layout id (e.g. 'dirt-life').")]
         string layoutId,
@@ -95,8 +105,13 @@ public sealed class ManifestTools(
         string onError = "abort",
 
         [Description("If true, compute the diff but do not write the manifest file. Default: false.")]
-        bool dryRun = false)
+        bool dryRun = false,
+
+        [Description(LayoutsPathProvider.ParameterDescription)]
+        string? layoutsPath = null)
     {
+        ResolvedLayoutsPath target = _pathProvider.Resolve(layoutsPath);
+
         BatchErrorMode mode = onError == "skip" ? BatchErrorMode.Skip : BatchErrorMode.Abort;
 
         List<RoutePatchInput> inputs = [];
@@ -112,14 +127,43 @@ public sealed class ManifestTools(
         }
 
         MutationResult result = await _service.ApplyBatchAsync(
-            _pathProvider.Path, layoutId, inputs, mode, dryRun);
+            target.LayoutsPath, layoutId, inputs, mode, dryRun);
 
-        return JsonOutputFormatter.FormatAsString(
-            command: "manifest apply-batch",
-            layoutId: layoutId,
-            dryRun: dryRun,
-            result);
+        return FormatEnvelope("manifest apply-batch", layoutId, dryRun, target, result);
     }
+
+    /// <summary>
+    /// Serializes the shared envelope (which carries <c>manifestPath</c> from the service).
+    /// A call that fell back to the server default gets a warning naming the file it
+    /// targeted — the server cannot tell whether that is the caller's checkout, so it makes
+    /// the target impossible to miss instead.
+    /// </summary>
+    private static string FormatEnvelope(
+        string command,
+        string layoutId,
+        bool dryRun,
+        ResolvedLayoutsPath target,
+        MutationResult result)
+    {
+        if (!target.IsExplicit)
+        {
+            bool wroteFile = !dryRun && result.Changes.Any(c => c.Status == RouteChangeStatus.Applied);
+            result = result with { Warnings = [.. result.Warnings, DefaultTargetWarning(result.ManifestPath, wroteFile)] };
+        }
+
+        return JsonOutputFormatter.FormatAsString(command, layoutId, dryRun, result);
+    }
+
+    /// <summary>
+    /// Warning attached to mutations that relied on the server's startup default. Says
+    /// "wrote to" only when the file was actually written (mirrors the service's own write
+    /// condition: not dry-run and at least one route applied).
+    /// </summary>
+    internal static string DefaultTargetWarning(string? manifestPath, bool wroteFile)
+        => "layoutsPath was not passed, so this call used the MCP server's default layouts directory "
+           + $"(the checkout the server was launched in) and {(wroteFile ? "wrote to" : "targeted")} "
+           + $"{manifestPath}. If you are editing a different git worktree, re-run with layoutsPath "
+           + "set to that worktree's layouts/ directory.";
 
     /// <summary>
     /// Wire shape for batch entries received via the MCP tool call. The MCP SDK's JSON

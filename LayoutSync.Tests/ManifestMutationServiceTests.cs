@@ -257,6 +257,70 @@ public class ManifestMutationServiceTests : IDisposable
         Assert.Single(result.Errors);
         Assert.Contains("not found", result.Errors[0]);
         Assert.Empty(result.Changes);
+        Assert.Equal(ManifestPath(), result.ManifestPath);
+    }
+
+    [Fact]
+    public async Task ApplyBatchAsync_Success_ReportsManifestPath()
+    {
+        WriteFixture(StandardFixture);
+        RoutePatchInput patch = new(Route: "/events", StructuralSection: "full-width-layout");
+
+        MutationResult result = await _service.SetRouteAsync(
+            _layoutsPath, LayoutId, patch, dryRun: true);
+
+        Assert.True(result.Success);
+        Assert.Equal(ManifestPath(), result.ManifestPath);
+    }
+
+    [Fact]
+    public async Task ApplyBatchAsync_SelfConflictingPatch_StillReportsManifestPath()
+    {
+        WriteFixture(StandardFixture);
+        RoutePatchInput patch = new(Route: "/events", MainSections: ["my-rsvps-list"], RemoveMain: true);
+
+        MutationResult result = await _service.SetRouteAsync(
+            _layoutsPath, LayoutId, patch, dryRun: false);
+
+        Assert.False(result.Success);
+        Assert.NotEmpty(result.Errors);
+        Assert.Equal(ManifestPath(), result.ManifestPath);
+    }
+
+    [Fact]
+    public void GetManifestPath_MatchesTheLayoutsConvention()
+    {
+        Assert.Equal(ManifestPath(), ManifestMutationService.GetManifestPath(_layoutsPath, LayoutId));
+    }
+
+    /// <summary>
+    /// A failed write must come back as a result that names the file, not as an exception
+    /// (which MCP clients only see as a generic "An error occurred" message).
+    /// </summary>
+    [FactWhenFilePermissionsEnforced]
+    public async Task ApplyBatchAsync_WriteFailure_ReturnsErrorNamingManifestPath()
+    {
+        WriteFixture(StandardFixture);
+        File.SetAttributes(ManifestPath(), FileAttributes.ReadOnly);
+        try
+        {
+            RoutePatchInput patch = new(Route: "/events", StructuralSection: "full-width-layout");
+
+            MutationResult result = await _service.SetRouteAsync(
+                _layoutsPath, LayoutId, patch, dryRun: false);
+
+            Assert.False(result.Success);
+            Assert.Empty(result.Changes);
+            Assert.Equal(ManifestPath(), result.ManifestPath);
+            string error = Assert.Single(result.Errors);
+            Assert.StartsWith($"Failed to write {ManifestPath()}", error);
+            Assert.Equal(StandardFixture, File.ReadAllText(ManifestPath()));
+        }
+        finally
+        {
+            // Windows refuses to delete read-only files, so restore before Dispose cleans up.
+            File.SetAttributes(ManifestPath(), FileAttributes.Normal);
+        }
     }
 
     [Fact]
