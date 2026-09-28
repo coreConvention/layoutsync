@@ -6,12 +6,12 @@ using Xunit;
 namespace LayoutSync.Tests;
 
 /// <summary>
-/// Unit tests for <see cref="WorktreePathGuard"/>. Two surfaces are covered:
+/// Unit tests for <see cref="WorktreePathGuard"/>. Three surfaces are covered:
 ///
 /// <list type="bullet">
 ///   <item><description><see cref="WorktreePathGuard.Classify"/> — pure string
 ///     classification of CWD + layouts-path against the
-///     <c>.claude/worktrees/&lt;name&gt;/</c> convention. Filesystem-free.</description></item>
+///     <c>.claude/worktrees/&lt;name&gt;/</c> path pattern. Filesystem-free.</description></item>
 ///   <item><description><see cref="WorktreePathGuard.Authorize"/> — gate behavior.
 ///     Verifies that <see cref="WorktreePathClassification.MismatchedWorktree"/>
 ///     refuses without the opt-in flag, that
@@ -19,7 +19,13 @@ namespace LayoutSync.Tests;
 ///     <see cref="WorktreePathClassification.MatchedWorktree"/> always pass, and
 ///     that the refusal banner surfaces operator-relevant context (cwd, mismatched
 ///     path, suggested correction, opt-in flag name).</description></item>
+///   <item><description><see cref="WorktreePathGuard.ParseRevParseOutput"/> — how the git
+///     probe reads <c>git rev-parse</c> output, fed canned output.</description></item>
 /// </list>
+///
+/// These tests pass <see cref="PatternOnly"/> as the worktree-root resolver, so they
+/// never run git: the guard's default resolver asks git first, and git detection
+/// against real repositories is covered by <see cref="WorktreePathGuardGitTests"/>.
 ///
 /// All paths are constructed from <see cref="Path.GetTempPath"/> so the tests are
 /// portable across Windows and Unix without assuming drive-letter or absolute-root
@@ -28,6 +34,13 @@ namespace LayoutSync.Tests;
 /// </summary>
 public class WorktreePathGuardTests
 {
+    /// <summary>
+    /// The path-pattern resolver on its own — the guard's only resolver before git
+    /// detection, and still its fallback. Pinned so these tests keep classifying by
+    /// path alone, independent of git and of whatever repository the paths sit in.
+    /// </summary>
+    private static readonly Func<string, string?> PatternOnly = WorktreePathGuard.FindWorktreeRootByPathPattern;
+
     /// <summary>
     /// Build an absolute path under the system temp directory using the platform's
     /// directory separator. Used to construct fake CWD / layouts paths without
@@ -53,7 +66,7 @@ public class WorktreePathGuardTests
 
         Assert.Equal(
             WorktreePathClassification.NotInWorktree,
-            WorktreePathGuard.Classify(cwd, layouts));
+            WorktreePathGuard.Classify(cwd, layouts, PatternOnly));
     }
 
     [Fact]
@@ -67,7 +80,7 @@ public class WorktreePathGuardTests
 
         Assert.Equal(
             WorktreePathClassification.NotInWorktree,
-            WorktreePathGuard.Classify(cwd, layouts));
+            WorktreePathGuard.Classify(cwd, layouts, PatternOnly));
     }
 
     // ── Classify: MatchedWorktree ────────────────────────────────────────────
@@ -83,7 +96,7 @@ public class WorktreePathGuardTests
 
         Assert.Equal(
             WorktreePathClassification.MatchedWorktree,
-            WorktreePathGuard.Classify(cwd, layouts));
+            WorktreePathGuard.Classify(cwd, layouts, PatternOnly));
     }
 
     [Fact]
@@ -97,7 +110,7 @@ public class WorktreePathGuardTests
 
         Assert.Equal(
             WorktreePathClassification.MatchedWorktree,
-            WorktreePathGuard.Classify(cwd, layouts));
+            WorktreePathGuard.Classify(cwd, layouts, PatternOnly));
     }
 
     // ── Classify: MismatchedWorktree (the issue #520 shape) ──────────────────
@@ -113,7 +126,7 @@ public class WorktreePathGuardTests
 
         Assert.Equal(
             WorktreePathClassification.MismatchedWorktree,
-            WorktreePathGuard.Classify(cwd, layouts));
+            WorktreePathGuard.Classify(cwd, layouts, PatternOnly));
     }
 
     [Fact]
@@ -126,7 +139,7 @@ public class WorktreePathGuardTests
 
         Assert.Equal(
             WorktreePathClassification.MismatchedWorktree,
-            WorktreePathGuard.Classify(cwd, layouts));
+            WorktreePathGuard.Classify(cwd, layouts, PatternOnly));
     }
 
     [Fact]
@@ -140,7 +153,7 @@ public class WorktreePathGuardTests
 
         Assert.Equal(
             WorktreePathClassification.MismatchedWorktree,
-            WorktreePathGuard.Classify(cwd, layouts));
+            WorktreePathGuard.Classify(cwd, layouts, PatternOnly));
     }
 
     // ── Classify: edge cases ─────────────────────────────────────────────────
@@ -165,7 +178,7 @@ public class WorktreePathGuardTests
     public void Authorize_NotInWorktree_ReturnsTrueAndEmitsNoBanner()
     {
         CapturingLogger logger = new();
-        WorktreePathGuard guard = new(logger);
+        WorktreePathGuard guard = new(logger, PatternOnly);
         string cwd = MakePath("repo", "src");
         string layouts = MakePath("repo", "layouts");
 
@@ -180,7 +193,7 @@ public class WorktreePathGuardTests
     public void Authorize_MatchedWorktree_ReturnsTrueAndEmitsNoBanner()
     {
         CapturingLogger logger = new();
-        WorktreePathGuard guard = new(logger);
+        WorktreePathGuard guard = new(logger, PatternOnly);
         string cwd = MakePath("repo", ".claude", "worktrees", "foo", "src");
         string layouts = MakePath("repo", ".claude", "worktrees", "foo", "layouts");
 
@@ -195,7 +208,7 @@ public class WorktreePathGuardTests
     public void Authorize_Mismatched_NoFlag_ReturnsFalseAndEmitsRefusalBanner()
     {
         CapturingLogger logger = new();
-        WorktreePathGuard guard = new(logger);
+        WorktreePathGuard guard = new(logger, PatternOnly);
         string cwd = MakePath("repo", ".claude", "worktrees", "foo", "src", "feature");
         string layouts = MakePath("repo", "layouts");
 
@@ -222,7 +235,7 @@ public class WorktreePathGuardTests
     public void Authorize_Mismatched_WithFlag_ReturnsTrueAndEmitsWarningBanner()
     {
         CapturingLogger logger = new();
-        WorktreePathGuard guard = new(logger);
+        WorktreePathGuard guard = new(logger, PatternOnly);
         string cwd = MakePath("repo", ".claude", "worktrees", "foo", "src");
         string layouts = MakePath("repo", "layouts");
 
@@ -239,15 +252,79 @@ public class WorktreePathGuardTests
         Assert.Empty(logger.CriticalEntries);
     }
 
+    // ── ParseRevParseOutput: reading the git probe's answer ──────────────────
+
+    [Fact]
+    public void ParseRevParseOutput_WorktreeReachedThroughALink_KeepsTheCallersSpelling()
+    {
+        // git canonicalizes --show-toplevel: reached through a symlink, a junction, or a
+        // substituted drive, it names the link's target. The layouts path keeps the
+        // caller's spelling, so the root is rebuilt from the caller's own path with
+        // --show-cdup; taken from --show-toplevel, a worktree reached through a link would
+        // refuse its own layouts/.
+        string callerRoot = MakePath("link-to-feature");
+        string gitRoot = GitStyle(MakePath("worktrees", "app", "feature"));
+        string commonDir = GitStyle(MakePath("checkouts", "app", ".git"));
+        string output = $"{gitRoot}\n{commonDir}/worktrees/feature\n{commonDir}\n../../\n";
+
+        WorktreePathGuard.GitCheckout? checkout = WorktreePathGuard.ParseRevParseOutput(
+            output,
+            Path.Combine(callerRoot, "src", "feature"));
+
+        Assert.NotNull(checkout);
+        Assert.True(checkout.IsLinkedWorktree);
+        Assert.Equal(callerRoot, checkout.Root);
+    }
+
+    [Theory]
+    // git older than 2.31 does not know --path-format and echoes it back as a first line.
+    [InlineData("--path-format=absolute\n{repo}\n{repo}/.git\n{repo}/.git\n\n")]
+    // Relative git dirs instead of the absolute ones asked for.
+    [InlineData("{repo}\n.git\n.git\n\n")]
+    // Too few lines.
+    [InlineData("{repo}\n")]
+    [InlineData("")]
+    // A --show-cdup that is not a straight walk up.
+    [InlineData("{repo}\n{repo}/.git\n{repo}/.git\nsrc/\n")]
+    public void ParseRevParseOutput_UnrecognizedOutput_ReturnsNull(string template)
+    {
+        // null sends the guard to the path-pattern fallback rather than acting on a misread.
+        string output = template.Replace("{repo}", GitStyle(MakePath("repo")));
+
+        Assert.Null(WorktreePathGuard.ParseRevParseOutput(output, MakePath("repo", "src")));
+    }
+
+    // ── ProbeGitCheckout: saying so when git cannot be asked ─────────────────
+
+    [Fact]
+    public void ProbeGitCheckout_GitNotFound_ReportsWhyAndReturnsNull()
+    {
+        // The fallback cannot see a worktree outside the repository, so a run that could not
+        // ask git must say so; Authorize turns this reason into its warning. The finder is
+        // injected so the test never touches the process-wide PATH other tests rely on.
+        string? reason = null;
+
+        WorktreePathGuard.GitCheckout? checkout = WorktreePathGuard.ProbeGitCheckout(
+            MakePath("repo"),
+            onGitUnavailable: r => reason = r,
+            findGit: () => null);
+
+        Assert.Null(checkout);
+        Assert.Equal("git was not found on PATH", reason);
+    }
+
+    /// <summary>A path the way git prints it: forward slashes on every platform.</summary>
+    private static string GitStyle(string path) => path.Replace('\\', '/');
+
     // ── Test doubles ─────────────────────────────────────────────────────────
 
     /// <summary>
     /// Minimal <see cref="ILogger{T}"/> that records formatted messages for WARN
     /// and Critical levels — mirrors the same shape used by
     /// <see cref="ProductionTargetGuardTests"/> so the two guards' banner
-    /// assertions stay symmetric.
+    /// assertions stay symmetric. Also used by <see cref="WorktreePathGuardGitTests"/>.
     /// </summary>
-    private sealed class CapturingLogger : ILogger<WorktreePathGuard>
+    internal sealed class CapturingLogger : ILogger<WorktreePathGuard>
     {
         public List<string> WarningEntries { get; } = [];
         public List<string> CriticalEntries { get; } = [];

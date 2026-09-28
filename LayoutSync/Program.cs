@@ -340,8 +340,8 @@ public class Program
                         args.Layout);
             }
 
-            // Worktree-mismatch guard — issue #520. When CWD is inside a w31rd.com
-            // worktree (`.claude/worktrees/<name>/`) but the resolved layouts-path is
+            // Worktree-mismatch guard — issue #520. When CWD is inside a git worktree
+            // (found by asking git, wherever it lives) but the resolved layouts-path is
             // OUTSIDE that worktree, refuse the run. This catches the silent-failure
             // pattern where an explicit --layouts-path pointed at the main repo while
             // the operator was editing files in a worktree, causing LayoutSync to sync
