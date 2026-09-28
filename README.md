@@ -58,7 +58,7 @@ Exit codes:
 | `1` | Error: bad configuration or input, an I/O failure, or a rejected manifest change. |
 | `2` | `--strict` was set and a validator reported a problem. For the section-registry subcommands, any warning counts. |
 | `3` | Refused to write to a non-local RavenDB server. Pass `--allow-remote-sync` if you mean it. |
-| `4` | Refused because the current directory is inside a worktree (`.claude/worktrees/<name>/`) but the layouts path points outside it. Pass `--allow-cross-worktree-sync` if you mean it. |
+| `4` | Refused because the current directory is inside a git worktree but the layouts path points outside that worktree. Pass `--allow-cross-worktree-sync` if you mean it. LayoutSync asks git whether the directory is in a linked worktree, so the worktree can live anywhere; when git is not installed or cannot answer, it recognizes only directories under `.claude/worktrees/<name>/`. |
 | `5` | `--sync-once` finished, but one or more documents failed to sync: a layout file could not be read or parsed, or writing its document to RavenDB failed. Returned with or without `--strict` (and under `--dry-run`, for unreadable files), and takes precedence over `2`. |
 
 ### Section registry
