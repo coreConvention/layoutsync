@@ -77,9 +77,14 @@ public class LocalFileService(ILogger<LocalFileService> logger)
             }
 
             // Extract id and identifier from content
-            // Check for top-level "id" first, then fall back to "@metadata.@id" (RavenDB format)
-            string? id = content["id"]?.GetValue<string>()
-                ?? content["@metadata"]?.AsObject()?["@id"]?.GetValue<string>();
+            // Check for top-level "id" first, then fall back to "@metadata.@id" (RavenDB format).
+            // Only the fallback is a pin: it names the document id itself, where a top-level "id"
+            // is a content field (issue #46).
+            string? topLevelId = content["id"]?.GetValue<string>();
+            string? pinnedId = topLevelId == null
+                ? content["@metadata"]?.AsObject()?["@id"]?.GetValue<string>()
+                : null;
+            string? id = topLevelId ?? pinnedId;
             string? identifier = content["identifier"]?.GetValue<string>();
 
             // Check if ID is human-readable
@@ -96,6 +101,7 @@ public class LocalFileService(ILogger<LocalFileService> logger)
             SyncDocument doc = new()
             {
                 Id = id,
+                PinnedId = pinnedId,
                 Identifier = identifier,
                 DocumentType = docType,
                 EntityType = content["type"]?.GetValue<string>(),

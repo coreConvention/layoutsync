@@ -142,7 +142,7 @@ public sealed class LayoutScopedSyncTests : IDisposable
         Assert.Equal(1, sync.DocumentCollisionCount);
 
         IReadOnlyList<string> offenses = StrictModeGate.Offenses(
-            _store.DuplicateEntityIdentifierCount, sync.DocumentCollisionCount, validators: []);
+            _store.DuplicateEntityIdentifierCount, sync.DocumentCollisionCount, sync.PinnedIdMismatchCount, validators: []);
         Assert.Contains(offenses, offense => offense.Contains("document collision"));
         Assert.Equal(StrictModeGate.ExitCode, StrictModeGate.ExitCodeFor(offenses));
     }
@@ -209,7 +209,7 @@ public sealed class LayoutScopedSyncTests : IDisposable
         Assert.Equal(1, sync.DocumentCollisionCount);
         Assert.Equal(
             StrictModeGate.ExitCode,
-            StrictModeGate.ExitCodeFor(StrictModeGate.Offenses(0, sync.DocumentCollisionCount, validators: [])));
+            StrictModeGate.ExitCodeFor(StrictModeGate.Offenses(0, sync.DocumentCollisionCount, sync.PinnedIdMismatchCount, validators: [])));
     }
 
     // ── Migration: the first layout-scoped sync of an existing database ────────
