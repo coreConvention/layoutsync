@@ -13,6 +13,15 @@ public class SyncDocument
     public string? Id { get; set; }
 
     /// <summary>
+    /// The document id the file pins in <c>@metadata.@id</c>; null when it pins none, or when
+    /// <see cref="Id"/> comes from a top-level <c>id</c> field instead. A pin is applied only when
+    /// the document is created (under <c>--preserve-ids</c>): an existing document is found by
+    /// identifier and keeps the id it already has, which the sync reports when the two differ
+    /// (issue #46).
+    /// </summary>
+    public string? PinnedId { get; set; }
+
+    /// <summary>
     /// The human-readable identifier for entities.
     /// This is used for lookup when syncing.
     /// </summary>

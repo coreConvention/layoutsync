@@ -41,6 +41,14 @@ public class DocumentSyncService(
     public int DocumentCollisionCount { get; private set; }
 
     /// <summary>
+    /// Files, since the most recent <see cref="SyncAllAsync"/> batch started, whose
+    /// <c>@metadata.@id</c> pin is not the id of the stored document they resolved to. A pin is
+    /// applied only when the document is created, so that document keeps its id and nothing exists
+    /// under the pinned one; <c>--strict</c> turns a non-zero count into exit code 2. See issue #46.
+    /// </summary>
+    public int PinnedIdMismatchCount { get; private set; }
+
+    /// <summary>
     /// Syncs all files in the layouts directory.
     /// </summary>
     /// <param name="layoutsPath">Path to layouts directory.</param>
@@ -62,6 +70,7 @@ public class DocumentSyncService(
         // prior-batch state (e.g. earlier watch-mode re-syncs) doesn't leak into this pass.
         foreach (ISeedValidator validator in _validators)
             validator.Reset();
+        PinnedIdMismatchCount = 0;
 
         // Track synced documents per collection for orphan detection, one bucket per collection.
         // Each bucket holds (layoutId, identifier) COMPOSITE keys (see OrphanTrackingKey), not bare
@@ -303,6 +312,23 @@ public class DocumentSyncService(
                 "Document collision: {Path} resolves to {Collection} document {DocumentId}, which {OwnerPath} already resolved to in this run. The later file is not synced, so the document is not replaced twice. --strict fails the run (exit code 2). See issue #28.",
                 doc.RelativePath, doc.DocumentType.GetCollection(), existingDocId, owner!.RelativePath);
             return SyncResult.Skipped(doc, $"Collision: resolves to document {existingDocId}, already claimed by {owner.RelativePath}");
+        }
+
+        // A pin (@metadata.@id) is applied only when the document is created. This file's document
+        // already exists under another id and every branch below keeps that id, so nothing is ever
+        // stored under the pinned one and whatever references it finds nothing — with no other
+        // sign of it (issue #46). Reported here, ahead of the unchanged and dry-run returns,
+        // because an up-to-date document is the steady state of a pin added after the fact.
+        // Identities are looked up BY their id, so theirs cannot differ; ids compare
+        // case-insensitively, as RavenDB's do.
+        if (existingDocId != null
+            && !string.IsNullOrEmpty(doc.PinnedId)
+            && !string.Equals(existingDocId, doc.PinnedId, StringComparison.OrdinalIgnoreCase))
+        {
+            PinnedIdMismatchCount++;
+            _logger.LogWarning(
+                "Pinned id mismatch: {Path} pins @metadata.@id '{PinnedId}', but its {Collection} document is already stored as '{StoredId}'. A pin only applies when the document is created (with --preserve-ids); an existing document is updated in place and keeps its id, so no document has the pinned id and anything that references it finds nothing. Change the pin and its references to the stored id, or delete the stored document so the next --preserve-ids sync creates it under the pinned id. --strict fails the run (exit code 2). See issue #46.",
+                doc.RelativePath, doc.PinnedId, doc.DocumentType.GetCollection(), existingDocId);
         }
 
         // Compare BEFORE the dry-run branch so --dry-run is a true diff: "Would UPDATE" only when
@@ -891,6 +917,13 @@ public class DocumentSyncService(
             _logger.LogWarning(
                 "{Count} document collision(s): see the 'Document collision' lines above for which files were not synced",
                 DocumentCollisionCount);
+        }
+
+        if (PinnedIdMismatchCount > 0)
+        {
+            _logger.LogWarning(
+                "{Count} pinned id mismatch(es): see the 'Pinned id mismatch' lines above for the files whose @metadata.@id is not the id their document is stored under",
+                PinnedIdMismatchCount);
         }
 
         if (batch.HumanReadableIdCount > 0)

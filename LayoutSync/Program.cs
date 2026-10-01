@@ -91,12 +91,12 @@ public class Program
 
         Option<bool> preserveIdsOption = new(
             aliases: ["--preserve-ids"],
-            description: "Preserve IDs from local files when creating documents (uses @metadata.@id for identities)")
+            description: "Preserve IDs from local files when creating documents (uses @metadata.@id for identities). Applies at creation only: a document that already exists keeps its id, and a file whose @metadata.@id differs from it is reported as a pinned id mismatch (see --strict).")
         { IsRequired = false };
 
         Option<bool> strictOption = new(
             aliases: ["--strict"],
-            description: "Exit non-zero (code 2) if the sync flagged anything: duplicate identifiers, document collisions (files that resolve to the same stored document; those files are never synced, with or without --strict), or seed-validator warnings (e.g. raw-NanoID authorship). Detection only — nothing is auto-deleted. Intended for CI.")
+            description: "Exit non-zero (code 2) if the sync flagged anything: duplicate identifiers, document collisions (files that resolve to the same stored document; those files are never synced, with or without --strict), pinned id mismatches (a file whose @metadata.@id is not the id its document is already stored under; the document keeps its stored id), or seed-validator warnings (e.g. raw-NanoID authorship). Detection only — nothing is auto-deleted. Intended for CI.")
         { IsRequired = false };
 
         Option<bool> allowRemoteSyncOption = new(
@@ -435,6 +435,7 @@ public class Program
             // sync. All of the following contribute to the same gate (StrictModeGate):
             //   • duplicate entity identifiers (RavenDbService)
             //   • document collisions — files resolving to one stored document (DocumentSyncService, #28)
+            //   • pinned id mismatches — a file's @metadata.@id is not its stored document's id (DocumentSyncService, #46)
             //   • raw-NanoID authorship warnings (SeedAuthorshipValidator, #308)
             //   • dangling / unpinned-target cross-references (SeedCrossReferenceValidator, #300)
             //   • dead/no-op widget props on sections (DeadWidgetPropValidator, #984)
@@ -448,6 +449,7 @@ public class Program
                 IReadOnlyList<string> offenses = StrictModeGate.Offenses(
                     ravenService.DuplicateEntityIdentifierCount,
                     syncService.DocumentCollisionCount,
+                    syncService.PinnedIdMismatchCount,
                     host.Services.GetServices<ISeedValidator>());
 
                 foreach (string offense in offenses)
