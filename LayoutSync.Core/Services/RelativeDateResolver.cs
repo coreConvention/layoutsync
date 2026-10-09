@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
@@ -12,6 +13,12 @@ namespace LayoutSync.Services;
 /// files, schema authors express intent ("3 days from now") rather than a point in time that will
 /// eventually be in the past. LayoutSync resolves the expression to an ISO string at sync time, so
 /// the database always holds real timestamps.
+///
+/// Output format: UTC with millisecond precision, "yyyy-MM-ddTHH:mm:ss.fffZ" — the exact text a
+/// browser's Date.prototype.toISOString() produces, which the w31rd platform standardises on
+/// (coreConvention/w31rd#3238). Until issue #48 this wrote .NET's round-trip "o" format (seven
+/// fractional digits), so seeded values differed in shape from SPA-written ones in the same
+/// fields and string comparisons between them misordered.
 ///
 /// Supported syntax (in recognized date field names only — see <see cref="IsDateFieldName"/>):
 ///   +Nd   — N days in the future
@@ -38,6 +45,15 @@ public partial class RelativeDateResolver(ILogger<RelativeDateResolver> logger)
     /// </summary>
     [GeneratedRegex(@"^(?<sign>[+-]?)(?<amount>\d+)(?<unit>[dwm])$|^now$", RegexOptions.IgnoreCase)]
     private static partial Regex RelativeDatePattern();
+
+    /// <summary>
+    /// toISOString()'s shape. "fff" truncates the ticks below a millisecond rather than rounding
+    /// (as DateTimeOffset.ToUnixTimeMilliseconds does), so "now" never names a later millisecond
+    /// than the real one, and 23:59:59.9999999 never rolls into the next day. Always
+    /// formatted with the invariant culture: in a custom format ':' is the culture's time separator
+    /// and "yyyy" follows the culture's calendar (th-TH would write 2026 as 2569).
+    /// </summary>
+    private const string IsoMillisecondFormat = "yyyy-MM-dd'T'HH:mm:ss.fff'Z'";
 
     /// <summary>
     /// Set of JSON field names that are recognized as date/time carriers. Only fields whose name
@@ -79,7 +95,8 @@ public partial class RelativeDateResolver(ILogger<RelativeDateResolver> logger)
         => RelativeDatePattern().IsMatch(value.Trim());
 
     /// <summary>
-    /// Resolves a single relative-date expression to an ISO 8601 UTC string.
+    /// Resolves a single relative-date expression to an ISO 8601 UTC string with millisecond
+    /// precision, e.g. "2026-10-16T19:10:51.123Z" (see <see cref="IsoMillisecondFormat"/>).
     /// The resolution is performed relative to <paramref name="referenceUtc"/> (defaults to UtcNow).
     /// Returns null if the expression does not match the pattern.
     /// </summary>
@@ -87,6 +104,8 @@ public partial class RelativeDateResolver(ILogger<RelativeDateResolver> logger)
     /// <param name="referenceUtc">
     /// The point in time to calculate the offset from. Defaults to <see cref="DateTime.UtcNow"/>
     /// when null. Injecting a fixed reference is primarily for deterministic unit testing.
+    /// A <see cref="DateTimeKind.Local"/> value is converted to UTC before the offset is added;
+    /// an <see cref="DateTimeKind.Unspecified"/> one is taken as UTC, as the name says.
     /// </param>
     public string? Resolve(string expression, DateTime? referenceUtc = null)
     {
@@ -99,11 +118,11 @@ public partial class RelativeDateResolver(ILogger<RelativeDateResolver> logger)
             return null;
         }
 
-        DateTime reference = referenceUtc ?? DateTime.UtcNow;
+        DateTime reference = ToUtc(referenceUtc ?? DateTime.UtcNow);
 
         // "now" special case
         if (trimmed.Equals("now", StringComparison.OrdinalIgnoreCase))
-            return reference.ToString("o");
+            return ToIsoMilliseconds(reference);
 
         int amount = int.Parse(match.Groups["amount"].Value);
         char unit = char.ToLowerInvariant(match.Groups["unit"].Value[0]);
@@ -121,7 +140,7 @@ public partial class RelativeDateResolver(ILogger<RelativeDateResolver> logger)
             _ => throw new InvalidOperationException($"Unknown relative-date unit '{unit}'")
         };
 
-        string iso = resolved.ToString("o");
+        string iso = ToIsoMilliseconds(resolved);
         _logger.LogDebug(
             "RelativeDateResolver: resolved '{Expression}' -> '{Iso}'",
             expression, iso);
@@ -150,6 +169,22 @@ public partial class RelativeDateResolver(ILogger<RelativeDateResolver> logger)
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Normalizes the reference to UTC before any arithmetic. Adding days to a Local value and
+    /// converting afterwards would shift the result by any daylight-saving change in between,
+    /// making the stored instant depend on the machine's time zone. Unspecified is not passed to
+    /// <see cref="DateTime.ToUniversalTime"/>, which would treat it as local.
+    /// </summary>
+    private static DateTime ToUtc(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+    };
+
+    private static string ToIsoMilliseconds(DateTime utc)
+        => utc.ToString(IsoMillisecondFormat, CultureInfo.InvariantCulture);
 
     private void ResolveObject(JsonObject obj, DateTime reference)
     {

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Nodes;
 using LayoutSync.Services;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -7,12 +8,21 @@ namespace LayoutSync.Tests;
 
 /// <summary>
 /// Unit tests for <see cref="RelativeDateResolver"/>.
-/// All tests use a fixed reference date (2026-04-23T12:00:00Z) so assertions are deterministic.
+/// All tests use fixed reference dates so assertions are deterministic: a whole-second one for the
+/// arithmetic, and one with sub-millisecond ticks for the output format (issue #48).
 /// </summary>
 public class RelativeDateResolverTests
 {
     // Fixed reference: 2026-04-23 12:00:00 UTC
     private static readonly DateTime Reference = new(2026, 4, 23, 12, 0, 0, DateTimeKind.Utc);
+
+    // 2026-10-16 19:10:51.1234567 UTC. The ticks below the millisecond are the ones .NET's "o"
+    // format used to write and a browser's toISOString() never can (issue #48).
+    private static readonly DateTime SubMillisecondReference =
+        new DateTime(2026, 10, 16, 19, 10, 51, 123, DateTimeKind.Utc).AddTicks(4567);
+
+    // The only shape toISOString() produces for years 0-9999 (DateTime's whole range).
+    private const string MillisecondIsoPattern = @"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$";
 
     private static RelativeDateResolver CreateResolver()
         => new(NullLogger<RelativeDateResolver>.Instance);
@@ -167,14 +177,82 @@ public class RelativeDateResolverTests
         Assert.Null(resolver.Resolve("tomorrow", Reference));
     }
 
-    [Fact]
-    public void Resolve_ReturnsIsoRoundTripFormat()
+    // ── Output format (issue #48) ─────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("now", "2026-10-16T19:10:51.123Z")]
+    [InlineData("+3d", "2026-10-19T19:10:51.123Z")]
+    [InlineData("-5d", "2026-10-11T19:10:51.123Z")]
+    [InlineData("+2w", "2026-10-30T19:10:51.123Z")]
+    [InlineData("+1m", "2026-11-16T19:10:51.123Z")]
+    [InlineData("-2m", "2026-08-16T19:10:51.123Z")]
+    public void Resolve_WritesMillisecondIsoUtc(string expression, string expected)
     {
+        // Exactly the text toISOString() gives for the same instant: three fractional digits, 'Z'.
+        Assert.Equal(expected, CreateResolver().Resolve(expression, SubMillisecondReference));
+    }
+
+    [Fact]
+    public void Resolve_WholeSecondReference_StillWritesThreeFractionalDigits()
+    {
+        Assert.Equal("2026-04-23T12:00:00.000Z", CreateResolver().Resolve("now", Reference));
+    }
+
+    [Fact]
+    public void Resolve_TruncatesSubMillisecondTicks_NeverRoundsUp()
+    {
+        // 23:59:59.9999999 on the last day of the year: rounding would carry into the next year.
+        DateTime lastTick = new DateTime(2026, 12, 31, 23, 59, 59, DateTimeKind.Utc).AddTicks(9_999_999);
         RelativeDateResolver resolver = CreateResolver();
-        string? result = resolver.Resolve("+1d", Reference);
-        Assert.NotNull(result);
-        // "o" round-trip format contains 'T' separator and 'Z' or timezone offset
-        Assert.Contains("T", result);
+
+        Assert.Equal("2026-12-31T23:59:59.999Z", resolver.Resolve("now", lastTick));
+        Assert.Equal("2027-01-01T23:59:59.999Z", resolver.Resolve("+1d", lastTick));
+    }
+
+    [Fact]
+    public void Resolve_LocalKindReference_IsConvertedToUtcBeforeTheOffsetIsAdded()
+    {
+        DateTime local = SubMillisecondReference.ToLocalTime();
+        RelativeDateResolver resolver = CreateResolver();
+
+        Assert.Equal("2026-10-16T19:10:51.123Z", resolver.Resolve("now", local));
+        // Three weeks crosses the end of daylight saving time in zones that observe it (EU 25 Oct,
+        // US 1 Nov 2026). Adding in local time would move the UTC result by the DST change, so the
+        // output would depend on the machine's zone.
+        Assert.Equal("2026-11-06T19:10:51.123Z", resolver.Resolve("+3w", local));
+    }
+
+    [Fact]
+    public void Resolve_UnspecifiedKindReference_IsTakenAsUtc()
+    {
+        // The parameter is documented as UTC. ToUniversalTime() would treat Unspecified as local
+        // and shift it by the machine's offset.
+        DateTime unspecified = DateTime.SpecifyKind(SubMillisecondReference, DateTimeKind.Unspecified);
+        Assert.Equal("2026-10-16T19:10:51.123Z", CreateResolver().Resolve("now", unspecified));
+    }
+
+    [Fact]
+    public void Resolve_IgnoresCurrentCulture()
+    {
+        CultureInfo original = CultureInfo.CurrentCulture;
+        try
+        {
+            // th-TH formats dates in the Thai Buddhist calendar, where 2026 is 2569.
+            CultureInfo.CurrentCulture = new CultureInfo("th-TH");
+            Assert.Equal("2026-10-16T19:10:51.123Z", CreateResolver().Resolve("now", SubMillisecondReference));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = original;
+        }
+    }
+
+    [Theory]
+    [InlineData("now")]
+    [InlineData("+1d")]
+    public void Resolve_DefaultReference_WritesMillisecondIsoUtc(string expression)
+    {
+        Assert.Matches(MillisecondIsoPattern, CreateResolver().Resolve(expression));
     }
 
     // ── ResolveInDocument ─────────────────────────────────────────────────────
@@ -314,6 +392,33 @@ public class RelativeDateResolverTests
             Assert.False(RelativeDateResolver.IsRelativeDate(startDate),
                 $"Expected resolved ISO but got: {startDate}");
         }
+    }
+
+    [Fact]
+    public void ResolveInDocument_WritesMillisecondIsoUtcAtEveryDepth()
+    {
+        JsonObject doc = new()
+        {
+            ["date"] = "now",
+            ["data"] = new JsonObject { ["startDate"] = "+1d" },
+            ["sessions"] = new JsonArray(new JsonObject { ["endDate"] = "-1w" }),
+        };
+
+        CreateResolver().ResolveInDocument(doc, SubMillisecondReference);
+
+        Assert.Equal("2026-10-16T19:10:51.123Z", doc["date"]!.GetValue<string>());
+        Assert.Equal("2026-10-17T19:10:51.123Z", doc["data"]!["startDate"]!.GetValue<string>());
+        Assert.Equal("2026-10-09T19:10:51.123Z", doc["sessions"]![0]!["endDate"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ResolveInDocument_DefaultReference_WritesMillisecondIsoUtc()
+    {
+        JsonObject doc = new() { ["date"] = "+3d" };
+
+        CreateResolver().ResolveInDocument(doc);
+
+        Assert.Matches(MillisecondIsoPattern, doc["date"]!.GetValue<string>());
     }
 
     [Fact]
