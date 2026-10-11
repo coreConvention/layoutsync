@@ -1,6 +1,7 @@
 using System.CommandLine;
 using System.CommandLine.Invocation;
 using LayoutSync.Configuration;
+using LayoutSync.Models;
 using LayoutSync.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -79,9 +80,16 @@ public class Program
             description: "Show what would happen without making changes")
         { IsRequired = false };
 
+        // Listed from the same registry and predicate that orphan detection uses, so the help names
+        // every collection --clean deletes from. A hand-written list named 4 of 12 (issue #53).
+        // Folder names, not RavenDB collection names: they are the CLI's vocabulary, the values
+        // --exclude-collection takes (themes is stored in theme-definitions, for example).
+        string cleanedCollections = string.Join(", ", CollectionFolders.Ordered
+            .Where(pair => pair.Type.IsStaticCollection())
+            .Select(pair => pair.Folder));
         Option<bool> cleanOption = new(
             aliases: ["--clean"],
-            description: "Delete orphaned documents from static collections (Sections, Layouts, Menus, Modals)")
+            description: $"Delete orphaned documents (stored in RavenDB with no local file) from the collections of these collection folders: {cleanedCollections}. Entities and identities are never deleted. --layout, --exclude-collection and --exclude-layout narrow what it deletes.")
         { IsRequired = false };
 
         Option<bool> verboseOption = new(
