@@ -154,7 +154,7 @@ public class DocumentSyncService(
         sw.Stop();
         batch.TotalDuration = sw.Elapsed;
 
-        LogBatchSummary(batch, fileCount);
+        LogBatchSummary(batch, fileCount, dryRun, cleanOrphans);
         return batch;
     }
 
@@ -868,7 +868,7 @@ public class DocumentSyncService(
                 && JsonEquivalent(pair.First.Value, pair.Second.Value));
     }
 
-    private void LogBatchSummary(SyncBatchResult batch, int fileCount)
+    private void LogBatchSummary(SyncBatchResult batch, int fileCount, bool dryRun, bool cleanOrphans)
     {
         _logger.LogInformation("");
 
@@ -936,18 +936,21 @@ public class DocumentSyncService(
             _logger.LogWarning("{Count} files have human-readable IDs", batch.HumanReadableIdCount);
         }
 
-        // Report orphan summary
+        // Report orphan summary. Only a run without --clean is told to pass it; a dry-run with
+        // --clean previews the deletes instead (issue #51). A real --clean whose deletes all failed
+        // prints nothing here: those failures are not recorded yet (issue #37).
+        int totalOrphans = batch.OrphansDetected.Values.Sum(d => d.Count);
         if (batch.OrphanDeletedCount > 0)
         {
             _logger.LogWarning("{Count} orphan(s) deleted", batch.OrphanDeletedCount);
         }
-        else if (batch.OrphansDetected.Count > 0)
+        else if (totalOrphans > 0 && !cleanOrphans)
         {
-            int totalOrphans = batch.OrphansDetected.Values.Sum(d => d.Count);
-            if (totalOrphans > 0)
-            {
-                _logger.LogInformation("{Count} orphan(s) detected. Use --clean to remove.", totalOrphans);
-            }
+            _logger.LogInformation("{Count} orphan(s) detected. Use --clean to remove.", totalOrphans);
+        }
+        else if (totalOrphans > 0 && dryRun)
+        {
+            _logger.LogWarning("{Count} orphan(s) would be deleted", totalOrphans);
         }
     }
 }

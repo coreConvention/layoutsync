@@ -15,7 +15,8 @@ namespace LayoutSync.Tests;
 /// The incident: a <c>--dry-run</c> without <c>--clean</c> printed <c>Would delete orphan</c> for
 /// two documents that the same command without <c>--dry-run</c> left in place. A dry-run is read to
 /// decide whether the real run is safe, so it must describe what that run does: only
-/// <c>--clean</c> deletes, and only a dry-run with <c>--clean</c> may say it would.
+/// <c>--clean</c> deletes, and only a dry-run with <c>--clean</c> may say it would. The batch
+/// summary follows the same rule (issue #51).
 /// </summary>
 public sealed class OrphanDryRunMessageTests : IDisposable
 {
@@ -60,6 +61,17 @@ public sealed class OrphanDryRunMessageTests : IDisposable
         ["data"] = new JsonObject { ["props"] = new JsonObject { ["variant"] = identifier } },
     };
 
+    /// <summary>Syncs one local section beside one stored section that has no file: a single orphan.</summary>
+    private Task<SyncBatchResult> SyncWithOneOrphanAsync(bool dryRun, bool clean)
+    {
+        string directory = Path.Combine(_layoutsPath, "dirt-life", "sections");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "hero.json"), Section("hero").ToJsonString());
+        _store.Seed("sections", OrphanId, Section("removed-section"));
+
+        return CreateSync().SyncAllAsync(_layoutsPath, dryRun: dryRun, cleanOrphans: clean);
+    }
+
     [Theory]
     [InlineData(false, false, LogLevel.Debug, "Orphan detected (not deleted without --clean):", false)]
     [InlineData(true, false, LogLevel.Information, "Orphan detected (not deleted without --clean):", false)]
@@ -68,12 +80,7 @@ public sealed class OrphanDryRunMessageTests : IDisposable
     public async Task Orphan_IsReportedAsTheRealRunHandlesIt_AndDeletedOnlyByARealClean(
         bool dryRun, bool clean, LogLevel expectedLevel, string expectedMessage, bool expectDeleted)
     {
-        string directory = Path.Combine(_layoutsPath, "dirt-life", "sections");
-        Directory.CreateDirectory(directory);
-        File.WriteAllText(Path.Combine(directory, "hero.json"), Section("hero").ToJsonString());
-        _store.Seed("sections", OrphanId, Section("removed-section"));
-
-        SyncBatchResult batch = await CreateSync().SyncAllAsync(_layoutsPath, dryRun: dryRun, cleanOrphans: clean);
+        SyncBatchResult batch = await SyncWithOneOrphanAsync(dryRun, clean);
 
         (LogLevel level, string message) = Assert.Single(_log.Entries, entry => entry.Message.Contains($"({OrphanId})"));
         Assert.Equal(expectedLevel, level);
@@ -81,6 +88,22 @@ public sealed class OrphanDryRunMessageTests : IDisposable
         Assert.Equal(expectDeleted, !_store.DocumentsIn("sections").ContainsKey(OrphanId));
         Assert.Equal(expectDeleted ? 1 : 0, batch.OrphanDeletedCount);
         Assert.Equal(OrphanId, Assert.Single(batch.OrphansDetected["sections"]).Key);
+    }
+
+    [Theory]
+    [InlineData(false, false, LogLevel.Information, "1 orphan(s) detected. Use --clean to remove.")]
+    [InlineData(true, false, LogLevel.Information, "1 orphan(s) detected. Use --clean to remove.")]
+    [InlineData(true, true, LogLevel.Warning, "1 orphan(s) would be deleted")]
+    [InlineData(false, true, LogLevel.Warning, "1 orphan(s) deleted")]
+    public async Task Summary_AdvisesCleanOnlyWhenCleanWasNotPassed(
+        bool dryRun, bool clean, LogLevel expectedLevel, string expectedSummary)
+    {
+        // Issue #51: a --dry-run --clean listed its deletes, then ended by advising --clean.
+        await SyncWithOneOrphanAsync(dryRun, clean);
+
+        (LogLevel level, string _) = Assert.Single(_log.Entries, entry => entry.Message == expectedSummary);
+        Assert.Equal(expectedLevel, level);
+        Assert.Equal(!clean, _log.Entries.Any(entry => entry.Message.Contains("Use --clean")));
     }
 
     /// <summary>Captures every log line with its level, so a test can tell Debug from Information.</summary>
