@@ -535,14 +535,19 @@ public class DocumentSyncService(
                         ));
                     }
                 }
-                else if (dryRun)
+                else if (deleteOrphans)
                 {
                     _logger.LogWarning("Would delete orphan: {Identifier} ({DocId}) from {Collection}", identifier, docId, collection);
                 }
                 else
                 {
-                    // Just report orphan without deleting (cleanOrphans=false)
-                    _logger.LogDebug("Orphan detected: {Identifier} ({DocId}) in {Collection}", identifier, docId, collection);
+                    // Without --clean nothing is deleted, dry-run or not, so a dry-run must not say it
+                    // would delete (issue #50): operators read the dry-run to decide whether the real
+                    // run is safe. It reports the orphan at Information so it stays visible there.
+                    _logger.Log(
+                        dryRun ? LogLevel.Information : LogLevel.Debug,
+                        "Orphan detected (not deleted without --clean): {Identifier} ({DocId}) in {Collection}",
+                        identifier, docId, collection);
                 }
             }
 
