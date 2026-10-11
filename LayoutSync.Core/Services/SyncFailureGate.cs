@@ -4,9 +4,10 @@ namespace LayoutSync.Services;
 
 /// <summary>
 /// The failed-documents decision, extracted from the CLI entry point so it is testable. A sync that
-/// could not read a layout file, or could not write its document, did not do its job, so the run
-/// fails with <see cref="ExitCode"/> whether or not <c>--strict</c> is set: <c>--strict</c>
-/// escalates validator warnings, and a failed document is not a warning (issue #36).
+/// could not read a layout file, could not write its document, or under <c>--clean</c> could not
+/// delete an orphan (issue #37), did not do its job, so the run fails with <see cref="ExitCode"/>
+/// whether or not <c>--strict</c> is set: <c>--strict</c> escalates validator warnings, and a
+/// failed document is not a warning (issue #36).
 /// </summary>
 public static class SyncFailureGate
 {

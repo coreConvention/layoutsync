@@ -61,7 +61,7 @@ public class Program
 
         Option<bool> syncOnceOption = new(
             aliases: ["--sync-once"],
-            description: "Sync once and exit (no watch mode). Exits with code 5 if any document failed to sync (a file could not be read or parsed, or writing its document failed), with or without --strict; 5 takes precedence over --strict's code 2. See issue #36.")
+            description: "Sync once and exit (no watch mode). Exits with code 5 if any document failed to sync (a file could not be read or parsed, writing its document failed, or --clean could not delete an orphan), with or without --strict; 5 takes precedence over --strict's code 2. See issues #36 and #37.")
         { IsRequired = false };
 
         Option<bool> validateOnlyOption = new(
@@ -458,10 +458,10 @@ public class Program
                 exitCode = StrictModeGate.ExitCodeFor(offenses);
             }
 
-            // Failed documents: a --sync-once run (dry runs included) that could not read a file or
-            // write its document exits 5, with or without --strict. Checked after the strict gate so
-            // its offenses are still logged; 5 wins over 2 because CI reads 2 as "every write
-            // succeeded". See issue #36.
+            // Failed documents: a --sync-once run (dry runs included) that could not read a file,
+            // write its document, or delete an orphan under --clean exits 5, with or without
+            // --strict. Checked after the strict gate so its offenses are still logged; 5 wins over
+            // 2 because CI reads 2 as "every write succeeded". See issues #36 and #37.
             if (syncOnceResult is not null)
             {
                 string? failure = SyncFailureGate.Describe(syncOnceResult);
