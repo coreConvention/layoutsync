@@ -154,7 +154,7 @@ public class DocumentSyncService(
         sw.Stop();
         batch.TotalDuration = sw.Elapsed;
 
-        LogBatchSummary(batch, fileCount);
+        LogBatchSummary(batch, fileCount, dryRun, cleanOrphans);
         return batch;
     }
 
@@ -541,14 +541,19 @@ public class DocumentSyncService(
                         batch.Results.Add(SyncResult.Failed(orphan, SyncAction.OrphanDeleted, "Delete operation returned false"));
                     }
                 }
-                else if (dryRun)
+                else if (deleteOrphans)
                 {
                     _logger.LogWarning("Would delete orphan: {Identifier} ({DocId}) from {Collection}", identifier, docId, collection);
                 }
                 else
                 {
-                    // Just report orphan without deleting (cleanOrphans=false)
-                    _logger.LogDebug("Orphan detected: {Identifier} ({DocId}) in {Collection}", identifier, docId, collection);
+                    // Without --clean nothing is deleted, dry-run or not, so a dry-run must not say it
+                    // would delete (issue #50): operators read the dry-run to decide whether the real
+                    // run is safe. It reports the orphan at Information so it stays visible there.
+                    _logger.Log(
+                        dryRun ? LogLevel.Information : LogLevel.Debug,
+                        "Orphan detected (not deleted without --clean): {Identifier} ({DocId}) in {Collection}",
+                        identifier, docId, collection);
                 }
             }
 
@@ -869,7 +874,7 @@ public class DocumentSyncService(
                 && JsonEquivalent(pair.First.Value, pair.Second.Value));
     }
 
-    private void LogBatchSummary(SyncBatchResult batch, int fileCount)
+    private void LogBatchSummary(SyncBatchResult batch, int fileCount, bool dryRun, bool cleanOrphans)
     {
         _logger.LogInformation("");
 
@@ -939,7 +944,9 @@ public class DocumentSyncService(
 
         // Report orphan summary. A real --clean reports the deletes that failed beside the ones
         // that succeeded, so a clean whose deletes all failed is not summarized as if it never
-        // ran (issue #37).
+        // ran (issue #37). Only a run without --clean is told to pass it; a dry-run with --clean
+        // previews the deletes instead (issue #51).
+        int totalOrphans = batch.OrphansDetected.Values.Sum(d => d.Count);
         if (batch.OrphanDeletedCount > 0 || batch.OrphanDeleteFailedCount > 0)
         {
             if (batch.OrphanDeletedCount > 0)
@@ -954,13 +961,13 @@ public class DocumentSyncService(
                     batch.OrphanDeleteFailedCount);
             }
         }
-        else if (batch.OrphansDetected.Count > 0)
+        else if (totalOrphans > 0 && !cleanOrphans)
         {
-            int totalOrphans = batch.OrphansDetected.Values.Sum(d => d.Count);
-            if (totalOrphans > 0)
-            {
-                _logger.LogInformation("{Count} orphan(s) detected. Use --clean to remove.", totalOrphans);
-            }
+            _logger.LogInformation("{Count} orphan(s) detected. Use --clean to remove.", totalOrphans);
+        }
+        else if (totalOrphans > 0 && dryRun)
+        {
+            _logger.LogWarning("{Count} orphan(s) would be deleted", totalOrphans);
         }
     }
 }
