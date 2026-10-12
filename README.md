@@ -59,7 +59,7 @@ Exit codes:
 | `2` | `--strict` was set and the sync flagged a problem: a validator warning, a duplicate identifier, a document collision (two files that resolve to the same stored document), or a [pinned id mismatch](#pinned-ids). For the section-registry subcommands, any warning counts. |
 | `3` | Refused to write to a non-local RavenDB server. Pass `--allow-remote-sync` if you mean it. |
 | `4` | Refused because the current directory is inside a git worktree but the layouts path points outside that worktree. Pass `--allow-cross-worktree-sync` if you mean it. LayoutSync asks git whether the directory is in a linked worktree, so the worktree can live anywhere; when git is not installed or cannot answer, it recognizes only directories under `.claude/worktrees/<name>/`. |
-| `5` | `--sync-once` finished, but one or more documents failed to sync: a layout file could not be read or parsed, or writing its document to RavenDB failed. Returned with or without `--strict` (and under `--dry-run`, for unreadable files), and takes precedence over `2`. |
+| `5` | `--sync-once` finished, but one or more documents failed to sync: a layout file could not be read or parsed, writing its document to RavenDB failed, or `--clean` could not delete an orphan (the orphan stays in the database, and the next `--clean` tries again). Returned with or without `--strict` (and under `--dry-run`, for unreadable files), and takes precedence over `2`. |
 
 ### Pinned ids
 

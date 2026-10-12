@@ -1,6 +1,7 @@
 using System.CommandLine;
 using System.CommandLine.Invocation;
 using LayoutSync.Configuration;
+using LayoutSync.Models;
 using LayoutSync.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -61,7 +62,7 @@ public class Program
 
         Option<bool> syncOnceOption = new(
             aliases: ["--sync-once"],
-            description: "Sync once and exit (no watch mode). Exits with code 5 if any document failed to sync (a file could not be read or parsed, or writing its document failed), with or without --strict; 5 takes precedence over --strict's code 2. See issue #36.")
+            description: "Sync once and exit (no watch mode). Exits with code 5 if any document failed to sync (a file could not be read or parsed, writing its document failed, or --clean could not delete an orphan), with or without --strict; 5 takes precedence over --strict's code 2. See issues #36 and #37.")
         { IsRequired = false };
 
         Option<bool> validateOnlyOption = new(
@@ -79,9 +80,16 @@ public class Program
             description: "Show what would happen without making changes")
         { IsRequired = false };
 
+        // Listed from the same registry and predicate that orphan detection uses, so the help names
+        // every collection --clean deletes from. A hand-written list named 4 of 12 (issue #53).
+        // Folder names, not RavenDB collection names: they are the CLI's vocabulary, the values
+        // --exclude-collection takes (themes is stored in theme-definitions, for example).
+        string cleanedCollections = string.Join(", ", CollectionFolders.Ordered
+            .Where(pair => pair.Type.IsStaticCollection())
+            .Select(pair => pair.Folder));
         Option<bool> cleanOption = new(
             aliases: ["--clean"],
-            description: "Delete orphaned documents from static collections (Sections, Layouts, Menus, Modals)")
+            description: $"Delete orphaned documents (stored in RavenDB with no local file) from the collections of these collection folders: {cleanedCollections}. Entities and identities are never deleted. --layout, --exclude-collection and --exclude-layout narrow what it deletes.")
         { IsRequired = false };
 
         Option<bool> verboseOption = new(
@@ -458,10 +466,10 @@ public class Program
                 exitCode = StrictModeGate.ExitCodeFor(offenses);
             }
 
-            // Failed documents: a --sync-once run (dry runs included) that could not read a file or
-            // write its document exits 5, with or without --strict. Checked after the strict gate so
-            // its offenses are still logged; 5 wins over 2 because CI reads 2 as "every write
-            // succeeded". See issue #36.
+            // Failed documents: a --sync-once run (dry runs included) that could not read a file,
+            // write its document, or delete an orphan under --clean exits 5, with or without
+            // --strict. Checked after the strict gate so its offenses are still logged; 5 wins over
+            // 2 because CI reads 2 as "every write succeeded". See issues #36 and #37.
             if (syncOnceResult is not null)
             {
                 string? failure = SyncFailureGate.Describe(syncOnceResult);

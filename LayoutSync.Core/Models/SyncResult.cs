@@ -166,8 +166,12 @@ public class SyncBatchResult
     /// <summary>Number of documents with human-readable IDs.</summary>
     public int HumanReadableIdCount => Results.Count(r => r.Document.HasHumanReadableId);
 
-    /// <summary>Number of orphan documents deleted.</summary>
-    public int OrphanDeletedCount => Results.Count(r => r.Action == SyncAction.OrphanDeleted);
+    /// <summary>Number of orphan documents deleted. Counts only deletes that succeeded: a failed
+    /// delete is recorded with the same action (issue #37), but the orphan is still stored.</summary>
+    public int OrphanDeletedCount => Results.Count(r => r.Action == SyncAction.OrphanDeleted && r.Success);
+
+    /// <summary>Number of orphans that <c>--clean</c> tried and failed to delete (issue #37).</summary>
+    public int OrphanDeleteFailedCount => Results.Count(r => r.Action == SyncAction.OrphanDeleted && !r.Success);
 
     /// <summary>Total duration of the batch.</summary>
     public TimeSpan TotalDuration { get; set; }
