@@ -524,15 +524,21 @@ public class DocumentSyncService(
                 if (deleteOrphans && !dryRun)
                 {
                     // Actually delete the orphan
+                    SyncDocument orphan = new() { Identifier = identifier, DocumentType = GetDocumentTypeForCollection(collection) };
                     bool deleted = await _ravenService.DeleteDocumentAsync(docId, ct);
                     if (deleted)
                     {
                         _logger.LogWarning("Deleted orphan: {Identifier} ({DocId}) from {Collection}", identifier, docId, collection);
-                        batch.Results.Add(SyncResult.Succeeded(
-                            new SyncDocument { Identifier = identifier, DocumentType = GetDocumentTypeForCollection(collection) },
-                            SyncAction.OrphanDeleted,
-                            docId
-                        ));
+                        batch.Results.Add(SyncResult.Succeeded(orphan, SyncAction.OrphanDeleted, docId));
+                    }
+                    else
+                    {
+                        // DeleteDocumentAsync logs the cause and returns false instead of throwing.
+                        // Record the failure so it reaches FailedCount and --sync-once exits 5, as a
+                        // failed write does (issue #37). The orphan stays stored; the next --clean
+                        // tries again.
+                        _logger.LogError("Failed to delete orphan: {Identifier} ({DocId}) from {Collection}", identifier, docId, collection);
+                        batch.Results.Add(SyncResult.Failed(orphan, SyncAction.OrphanDeleted, "Delete operation returned false"));
                     }
                 }
                 else if (deleteOrphans)
@@ -936,13 +942,24 @@ public class DocumentSyncService(
             _logger.LogWarning("{Count} files have human-readable IDs", batch.HumanReadableIdCount);
         }
 
-        // Report orphan summary. Only a run without --clean is told to pass it; a dry-run with
-        // --clean previews the deletes instead (issue #51). A real --clean whose deletes all failed
-        // prints nothing here: those failures are not recorded yet (issue #37).
+        // Report orphan summary. A real --clean reports the deletes that failed beside the ones
+        // that succeeded, so a clean whose deletes all failed is not summarized as if it never
+        // ran (issue #37). Only a run without --clean is told to pass it; a dry-run with --clean
+        // previews the deletes instead (issue #51).
         int totalOrphans = batch.OrphansDetected.Values.Sum(d => d.Count);
-        if (batch.OrphanDeletedCount > 0)
+        if (batch.OrphanDeletedCount > 0 || batch.OrphanDeleteFailedCount > 0)
         {
-            _logger.LogWarning("{Count} orphan(s) deleted", batch.OrphanDeletedCount);
+            if (batch.OrphanDeletedCount > 0)
+            {
+                _logger.LogWarning("{Count} orphan(s) deleted", batch.OrphanDeletedCount);
+            }
+
+            if (batch.OrphanDeleteFailedCount > 0)
+            {
+                _logger.LogWarning(
+                    "{Count} orphan(s) could not be deleted and are still in the database: see the 'Failed to delete orphan' lines above",
+                    batch.OrphanDeleteFailedCount);
+            }
         }
         else if (totalOrphans > 0 && !cleanOrphans)
         {
