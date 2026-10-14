@@ -1,4 +1,5 @@
 using System.Dynamic;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -53,15 +54,7 @@ public class RavenDbService : IDisposable
     X509Certificate2? certificate = null;
     if (!string.IsNullOrEmpty(options.CertificatePath))
     {
-      if (!File.Exists(options.CertificatePath))
-      {
-        throw new FileNotFoundException($"Certificate file not found: {options.CertificatePath}");
-      }
-
-      certificate = string.IsNullOrEmpty(options.CertificatePassword)
-        ? new X509Certificate2(options.CertificatePath)
-        : new X509Certificate2(options.CertificatePath, options.CertificatePassword);
-
+      certificate = LoadClientCertificate(options.CertificatePath, options.CertificatePassword);
       _logger.LogInformation("Loaded certificate: {Subject}", certificate.Subject);
     }
 
@@ -107,6 +100,64 @@ public class RavenDbService : IDisposable
       options.Url,
       options.Database
     );
+  }
+
+  /// <summary>
+  /// Loads the <c>--cert</c> client certificate a secured RavenDB server (RavenDB Cloud)
+  /// authenticates the sync with.
+  /// </summary>
+  /// <remarks>
+  /// PKCS#12 only (issue #57). The obsolete <c>X509Certificate2</c> file constructor also took
+  /// a bare DER or PEM certificate, but a certificate without its private key can never complete
+  /// the client-certificate handshake, so such a file is refused here, with a message that says
+  /// what <c>--cert</c> expects, instead of failing later inside TLS. The default key storage is
+  /// kept on purpose: on Windows, an <c>EphemeralKeySet</c> key cannot be used for TLS client
+  /// authentication.
+  /// </remarks>
+  /// <param name="path">The certificate file.</param>
+  /// <param name="password">The file's password; null or empty when it has none.</param>
+  /// <returns>The certificate, with its private key.</returns>
+  /// <exception cref="FileNotFoundException"><paramref name="path"/> does not exist.</exception>
+  /// <exception cref="CryptographicException">
+  /// The file is not a PKCS#12 file, holds no private key, or the password is wrong.
+  /// </exception>
+  internal static X509Certificate2 LoadClientCertificate(string path, string? password)
+  {
+    if (!File.Exists(path))
+    {
+      throw new FileNotFoundException($"Certificate file not found: {path}");
+    }
+
+    const string expected = "--cert expects a PKCS#12 (.pfx) file that contains the client certificate and its private key";
+
+    X509ContentType contentType;
+    try
+    {
+      contentType = X509Certificate2.GetCertContentType(path);
+    }
+    catch (CryptographicException)
+    {
+      // Windows throws ("Cannot find the requested object.") instead of returning Unknown when
+      // the file is in no certificate format at all, e.g. a JSON file passed by mistake.
+      contentType = X509ContentType.Unknown;
+    }
+
+    if (contentType != X509ContentType.Pkcs12)
+    {
+      throw new CryptographicException($"{expected}, but {path} is not a PKCS#12 file (detected: {contentType}).");
+    }
+
+    X509Certificate2 certificate = X509CertificateLoader.LoadPkcs12FromFile(
+      path,
+      string.IsNullOrEmpty(password) ? null : password);
+
+    if (!certificate.HasPrivateKey)
+    {
+      certificate.Dispose();
+      throw new CryptographicException($"{expected}, but {path} has no private key.");
+    }
+
+    return certificate;
   }
 
   /// <summary>
