@@ -344,12 +344,17 @@ public class FileWatcherService(
 
                     if (result.Success)
                     {
+                        // A successful Skipped here is always a --dry-run preview: the sync has just
+                        // logged "Would CREATE|UPDATE", so the confirmation must not claim a write.
+                        // The other Skipped results are collision refusals, which need a whole run's
+                        // claims; a single-file sync passes none, so it cannot produce them (issue #56).
                         string action = result.Action switch
                         {
                             SyncAction.Created => "Created",
                             SyncAction.Patched => "Patched",
                             SyncAction.Replaced => "Replaced",
                             SyncAction.Unchanged => "Unchanged",
+                            SyncAction.Skipped => "Not written (dry run):",
                             _ => "Synced"
                         };
                         _logger.LogInformation("-> {Action} '{Identifier}'", action, result.Document.Identifier);
@@ -406,7 +411,12 @@ public class FileWatcherService(
                 try
                 {
                     string relativePath = Path.GetRelativePath(_layoutsPath, filePath);
-                    _logger.LogInformation("Deleting from DB: {Path} ({Identifier})", relativePath, tracked.Identifier);
+                    // A --dry-run deletes nothing (the sync logs "Would DELETE" next), so its header is
+                    // worded as a preview, like the batch sync's "Would delete orphan" (issue #59).
+                    if (_dryRun)
+                        _logger.LogInformation("Would delete from DB: {Path} ({Identifier})", relativePath, tracked.Identifier);
+                    else
+                        _logger.LogInformation("Deleting from DB: {Path} ({Identifier})", relativePath, tracked.Identifier);
 
                     SyncResult result = await _syncService.DeleteTrackedDocumentAsync(
                         tracked.Identifier,
