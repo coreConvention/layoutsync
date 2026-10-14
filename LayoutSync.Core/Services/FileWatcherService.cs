@@ -411,7 +411,12 @@ public class FileWatcherService(
                 try
                 {
                     string relativePath = Path.GetRelativePath(_layoutsPath, filePath);
-                    _logger.LogInformation("Deleting from DB: {Path} ({Identifier})", relativePath, tracked.Identifier);
+                    // A --dry-run deletes nothing (the sync logs "Would DELETE" next), so its header is
+                    // worded as a preview, like the batch sync's "Would delete orphan" (issue #59).
+                    if (_dryRun)
+                        _logger.LogInformation("Would delete from DB: {Path} ({Identifier})", relativePath, tracked.Identifier);
+                    else
+                        _logger.LogInformation("Deleting from DB: {Path} ({Identifier})", relativePath, tracked.Identifier);
 
                     SyncResult result = await _syncService.DeleteTrackedDocumentAsync(
                         tracked.Identifier,

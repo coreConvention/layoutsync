@@ -16,6 +16,9 @@ namespace LayoutSync.Tests;
 /// Under <c>--dry-run</c> the sync logs <c>Would CREATE</c> or <c>Would UPDATE</c> and returns a skipped
 /// result, which the watcher used to confirm as <c>-&gt; Synced 'hero'</c>, as though it had been written.
 /// The contract: a dry run says the file was not written, and a real run names what it did to the document.
+///
+/// Issue #59 is the same mislabel for a deleted file: a dry run announced <c>Deleting from DB</c>, then
+/// logged <c>Would DELETE</c>. A dry run announces the deletion as one it would make; a real run is unchanged.
 /// </summary>
 public sealed class WatcherConfirmationTests : IDisposable
 {
@@ -23,7 +26,7 @@ public sealed class WatcherConfirmationTests : IDisposable
     private const string DryRunConfirmation = "-> Not written (dry run): 'hero'";
 
     private static readonly string Sections = DocumentType.Section.GetCollection();
-    private static readonly TimeSpan ConfirmationTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan LineTimeout = TimeSpan.FromSeconds(15);
 
     private readonly string _root;
     private readonly string _layoutsPath;
@@ -61,12 +64,28 @@ public sealed class WatcherConfirmationTests : IDisposable
     private static string StoredVariant(InMemoryRavenDbService store) =>
         Assert.Single(store.DocumentsIn(Sections)).Value["data"]!["props"]!["variant"]!.GetValue<string>();
 
+    private string HeroFile => Path.Combine(_sectionsPath, "hero.json");
+
+    private void WriteHero(JsonObject section) => File.WriteAllText(HeroFile, section.ToJsonString());
+
+    /// <summary>Writes <c>sections/hero.json</c> while watching, and returns the watcher's first confirmation line.</summary>
+    private Task<(LogLevel Level, string Message)> WatchOneChangeAsync(
+        InMemoryRavenDbService store, bool dryRun, JsonObject section) =>
+        WatchAsync(store, dryRun, () => WriteHero(section), awaited: "-> ");
+
+    /// <summary>Deletes <c>sections/hero.json</c> while watching, and returns the first line that starts with <paramref name="awaited"/>.</summary>
+    private Task<(LogLevel Level, string Message)> WatchOneDeletionAsync(
+        InMemoryRavenDbService store, bool dryRun, string awaited) =>
+        WatchAsync(store, dryRun, () => File.Delete(HeroFile), awaited);
+
     /// <summary>
-    /// Starts watching, writes <c>sections/hero.json</c>, and returns the first confirmation line the
-    /// watcher logs for it. The watcher is stopped before this returns, whether or not one arrived.
+    /// Syncs the layouts once and starts watching, as the CLI does: the initial sync tells the watcher which
+    /// document each file is, so a deletion targets that document. Then makes <paramref name="change"/> and
+    /// returns the first line that starts with <paramref name="awaited"/>. The watcher is stopped before this
+    /// returns, whether or not the line arrived.
     /// </summary>
-    private async Task<(LogLevel Level, string Message)> WatchOneChangeAsync(
-        InMemoryRavenDbService store, bool dryRun, JsonObject section)
+    private async Task<(LogLevel Level, string Message)> WatchAsync(
+        InMemoryRavenDbService store, bool dryRun, Action change, string awaited)
     {
         LocalFileService files = new(NullLogger<LocalFileService>.Instance);
         DocumentSyncService sync = new(
@@ -79,13 +98,14 @@ public sealed class WatcherConfirmationTests : IDisposable
             new CommandLineArgs());
         FileWatcherService watcher = new(_log.For<FileWatcherService>(), sync, files, new SyncOptions(), new CommandLineArgs());
 
+        SyncBatchResult initial = await sync.SyncAllAsync(_layoutsPath, dryRun: dryRun);
         using CancellationTokenSource cts = new();
-        // WatchAsync arms the file-system watcher before its first await, so the write below is seen.
-        Task watching = watcher.WatchAsync(_layoutsPath, dryRun: dryRun, ct: cts.Token);
+        // WatchAsync arms the file-system watcher before its first await, so the change below is seen.
+        Task watching = watcher.WatchAsync(_layoutsPath, dryRun: dryRun, initialSyncResult: initial, ct: cts.Token);
         try
         {
-            File.WriteAllText(Path.Combine(_sectionsPath, "hero.json"), section.ToJsonString());
-            return await FirstConfirmationAsync();
+            change();
+            return await FirstLineAsync(awaited);
         }
         finally
         {
@@ -94,14 +114,14 @@ public sealed class WatcherConfirmationTests : IDisposable
         }
     }
 
-    /// <summary>The first <c>-&gt; </c> line the watcher logs. It arrives from a timer thread after the debounce.</summary>
-    private async Task<(LogLevel Level, string Message)> FirstConfirmationAsync()
+    /// <summary>The first line that starts with <paramref name="awaited"/>. The watcher logs from a timer thread after the debounce.</summary>
+    private async Task<(LogLevel Level, string Message)> FirstLineAsync(string awaited)
     {
-        DateTime deadline = DateTime.UtcNow + ConfirmationTimeout;
+        DateTime deadline = DateTime.UtcNow + LineTimeout;
         while (DateTime.UtcNow < deadline)
         {
             List<(LogLevel Level, string Message)> entries = _log.Snapshot();
-            int index = entries.FindIndex(entry => entry.Message.StartsWith("-> "));
+            int index = entries.FindIndex(entry => entry.Message.StartsWith(awaited));
             if (index >= 0)
             {
                 return entries[index];
@@ -111,7 +131,7 @@ public sealed class WatcherConfirmationTests : IDisposable
         }
 
         throw new TimeoutException(
-            $"The watcher logged no confirmation line within {ConfirmationTimeout.TotalSeconds}s. Log:{Environment.NewLine}"
+            $"No line starting with \"{awaited}\" within {LineTimeout.TotalSeconds}s. Log:{Environment.NewLine}"
             + string.Join(Environment.NewLine, _log.Snapshot().Select(entry => $"{entry.Level}: {entry.Message}")));
     }
 
@@ -168,6 +188,41 @@ public sealed class WatcherConfirmationTests : IDisposable
 
         Assert.Equal((LogLevel.Information, expected), confirmation);
         Assert.Equal("new", StoredVariant(store));
+    }
+
+    // ── A deleted file ───────────────────────────────────────────────────────
+
+    private static readonly string HeroRelativePath = Path.Combine(Layout, "sections", "hero.json");
+
+    [Fact]
+    public async Task DryRun_DeletedFile_IsAnnouncedAsAPreview()
+    {
+        // Issue #59: "Deleting from DB: dirt-life/sections/hero.json (hero)" followed by "Would DELETE: hero".
+        using InMemoryRavenDbService store = new();
+        store.Seed(Sections, "sections/hero", Section("new"));
+        WriteHero(Section("new"));
+
+        (LogLevel Level, string Message) preview = await WatchOneDeletionAsync(store, dryRun: true, awaited: "Would DELETE: ");
+
+        string header = $"Would delete from DB: {HeroRelativePath} (hero)";
+        Assert.Equal(header, LineBefore(preview));
+        Assert.Contains((LogLevel.Information, header), _log.Snapshot());
+        Assert.DoesNotContain(_log.Snapshot(), entry => entry.Message.StartsWith("Deleting from DB"));
+        Assert.Equal("new", StoredVariant(store));
+    }
+
+    [Fact]
+    public async Task RealRun_DeletedFile_IsAnnouncedAndDeleted()
+    {
+        using InMemoryRavenDbService store = new();
+        store.Seed(Sections, "sections/hero", Section("new"));
+        WriteHero(Section("new"));
+
+        (LogLevel Level, string Message) summary = await WatchOneDeletionAsync(store, dryRun: false, awaited: "Deletion batch: ");
+
+        Assert.Equal((LogLevel.Information, "Deletion batch: 1 deleted, 0 failed"), summary);
+        Assert.Contains((LogLevel.Information, $"Deleting from DB: {HeroRelativePath} (hero)"), _log.Snapshot());
+        Assert.Empty(store.DocumentsIn(Sections));
     }
 
     // ── Test plumbing ────────────────────────────────────────────────────────
