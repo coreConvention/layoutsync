@@ -348,7 +348,7 @@ public class DocumentSyncService(
         {
             string action = existingDocId == null ? "Would CREATE" : "Would UPDATE";
             _logger.LogInformation("{Action}: {Path}", action, doc.RelativePath);
-            return SyncResult.Skipped(doc, $"Dry run: {action}");
+            return SyncResult.Skipped(doc, DryRunWriteReason + action);
         }
 
         try
@@ -874,25 +874,44 @@ public class DocumentSyncService(
                 && JsonEquivalent(pair.First.Value, pair.Second.Value));
     }
 
+    /// <summary>
+    /// Reason prefix of the result a <c>--dry-run</c> records for a write it would have made. A
+    /// refused collision is skipped too, so the batch summary tells the two apart by this prefix.
+    /// </summary>
+    private const string DryRunWriteReason = "Dry run: ";
+
+    /// <summary>
+    /// Whether a result counts toward the per-type totals in the batch summary: its document was
+    /// written or already matched the database, or a dry run would have written it. Failed writes,
+    /// unreadable files, refused collisions and orphan deletes are reported on their own lines
+    /// instead. Counting them as synced overstated what reached the database, and counted an
+    /// unreadable file, which has no type, as an entity (issue #54).
+    /// </summary>
+    private static bool CountsAsSynced(SyncResult result) =>
+        result.Success
+        && (result.Action is SyncAction.Created or SyncAction.Patched or SyncAction.Replaced or SyncAction.Unchanged
+            || (result.Action == SyncAction.Skipped && result.ErrorMessage?.StartsWith(DryRunWriteReason, StringComparison.Ordinal) == true));
+
     private void LogBatchSummary(SyncBatchResult batch, int fileCount, bool dryRun, bool cleanOrphans)
     {
         _logger.LogInformation("");
 
-        // Group results by collection for summary
-        int sections = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Section);
-        int layouts = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Layout);
-        int menus = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Menu);
-        int modals = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Modal);
-        int manifests = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Manifest);
-        int tags = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Tag);
-        int workflows = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Workflow);
-        int writePolicies = batch.Results.Count(r => r.Document.DocumentType == DocumentType.WritePolicy);
-        int readPolicies = batch.Results.Count(r => r.Document.DocumentType == DocumentType.ReadPolicy);
-        int entityConfigs = batch.Results.Count(r => r.Document.DocumentType == DocumentType.EntityConfig);
-        int themes = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Theme);
-        int emailTemplates = batch.Results.Count(r => r.Document.DocumentType == DocumentType.EmailTemplate);
-        int entities = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Entity);
-        int identities = batch.Results.Count(r => r.Document.DocumentType == DocumentType.Identity);
+        // Group the synced documents by collection for the summary.
+        List<SyncResult> synced = [.. batch.Results.Where(CountsAsSynced)];
+        int sections = synced.Count(r => r.Document.DocumentType == DocumentType.Section);
+        int layouts = synced.Count(r => r.Document.DocumentType == DocumentType.Layout);
+        int menus = synced.Count(r => r.Document.DocumentType == DocumentType.Menu);
+        int modals = synced.Count(r => r.Document.DocumentType == DocumentType.Modal);
+        int manifests = synced.Count(r => r.Document.DocumentType == DocumentType.Manifest);
+        int tags = synced.Count(r => r.Document.DocumentType == DocumentType.Tag);
+        int workflows = synced.Count(r => r.Document.DocumentType == DocumentType.Workflow);
+        int writePolicies = synced.Count(r => r.Document.DocumentType == DocumentType.WritePolicy);
+        int readPolicies = synced.Count(r => r.Document.DocumentType == DocumentType.ReadPolicy);
+        int entityConfigs = synced.Count(r => r.Document.DocumentType == DocumentType.EntityConfig);
+        int themes = synced.Count(r => r.Document.DocumentType == DocumentType.Theme);
+        int emailTemplates = synced.Count(r => r.Document.DocumentType == DocumentType.EmailTemplate);
+        int entities = synced.Count(r => r.Document.DocumentType == DocumentType.Entity);
+        int identities = synced.Count(r => r.Document.DocumentType == DocumentType.Identity);
 
         // Build summary parts (only show non-zero counts)
         List<string> parts = [];
@@ -913,10 +932,18 @@ public class DocumentSyncService(
 
         string summary = parts.Count > 0 ? string.Join(", ", parts) : "0 documents";
         // The unchanged count makes real drift readable at a glance: a sync with nothing to do
-        // reports every document unchanged instead of rewriting them all (issue #11).
+        // reports every document unchanged instead of rewriting them all (issue #11). Keep this
+        // line's wording as it is: downstream CI parses it, anchored at both ends (w31rd's
+        // scripts/check-layout-drift.mjs reads a dry run's line as proof that every document was
+        // compared). So a dry run is labeled on the line after it, not by rewording it (issue #54).
         _logger.LogInformation(
             "[check] {Summary} synced in {Duration:F1}s ({Unchanged} unchanged)",
             summary, batch.TotalDuration.TotalSeconds, batch.UnchangedCount);
+
+        if (dryRun)
+        {
+            _logger.LogInformation("Dry run: nothing was written. The totals above are what a real run would sync.");
+        }
 
         if (batch.FailedCount > 0)
         {
