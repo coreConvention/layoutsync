@@ -43,6 +43,7 @@ Run `layoutsync --help` (and `layoutsync manifest --help`, then `--help` on any 
 layoutsync --sync-once --preserve-ids        # sync every layout once, then exit
 layoutsync --layout dirt-life                # sync one layout, then keep watching and re-sync on every change
 layoutsync manifest set-route /events --layout dirt-life --structural-section full-width-layout --dry-run
+layoutsync manifest remove-route /messages/group-chats --layout dirt-life --dry-run
 layoutsync manifest rename-section full-width-layout dirt-life-full-width-layout --layout dirt-life --dry-run
 ```
 
@@ -56,7 +57,7 @@ Exit codes:
 |---|---|
 | `0` | Success. |
 | `1` | Error: bad configuration or input, an I/O failure, or a rejected manifest change. |
-| `2` | `--strict` was set and the sync flagged a problem: a validator warning, a duplicate identifier, a document collision (two files that resolve to the same stored document), or a [pinned id mismatch](#pinned-ids). For the section-registry subcommands, any warning counts. |
+| `2` | `--strict` was set and the sync flagged a problem: a validator warning, a duplicate identifier, a document collision (two files that resolve to the same stored document), or a [pinned id mismatch](#pinned-ids). For `remove-route` and the section-registry subcommands, any warning counts. |
 | `3` | Refused to write to a non-local RavenDB server. Pass `--allow-remote-sync` if you mean it. `--clean-records` is refused against a non-local server even then (see [Resetting a layout's records](#resetting-a-layouts-records)). |
 | `4` | Refused because the current directory is inside a git worktree but the layouts path points outside that worktree. Pass `--allow-cross-worktree-sync` if you mean it. LayoutSync asks git whether the directory is in a linked worktree, so the worktree can live anywhere; when git is not installed or cannot answer, it recognizes only directories under `.claude/worktrees/<name>/`. |
 | `5` | `--sync-once` finished, but one or more documents failed to sync: a layout file could not be read or parsed, writing its document to RavenDB failed, or `--clean` could not delete an orphan (the orphan stays in the database, and the next `--clean` tries again). Returned with or without `--strict` (and under `--dry-run`, for unreadable files), and takes precedence over `2`. |
@@ -72,6 +73,10 @@ layoutsync --sync-once --preserve-ids --clean --clean-records --layout __conform
 On top of the scoped clean, this deletes every entity and identity that belongs only to that layout and that no local file declares: records left by an earlier tree, and records an app created at runtime. A record belongs only to the layout when every layout it names in `layoutId`, `primaryLayoutId` and `layoutIds` is that layout, so an identity that is also a member of another layout is kept. A record counts as declared when its id or its `identifier` matches a local file. A record whose layout fields have an unexpected shape (a `layoutIds` that is not an array of strings, for example) is kept and reported. Each delete is made against the version the query read, so a record that changes in between, such as an identity that joins another layout, is not deleted.
 
 Guards: it needs `--clean`, `--layout` and `--sync-once` (exit `1` otherwise, so watch mode never deletes records an app creates between file saves), and it runs only against a local RavenDB, even with `--allow-remote-sync` (exit `3`). `--dry-run` lists what it would delete. `--exclude-collection entities` or `identities` leaves that collection alone. If any file cannot be read, the record clean is skipped, since that file may declare a record. A failed delete or query is a failed result (exit `5`).
+
+### Removing a route
+
+`remove-route <route>` deletes one entry from `routeConfigs`. It takes the same options as `set-route` (`--layout`, `--layouts-path`, `--dry-run`, `--json`, `--strict`, `--allow-cross-worktree-sync`). It refuses a route that is not there and suggests the closest route keys. The sections the route used stay declared in `entities.sections`. Each one that no remaining route references is reported as a warning: if nothing else in the manifest names it, you can retire it with `remove-section`, and if another field still names it (for example `routing.notFoundSection`), the warning lists that field. With `--strict`, any such warning makes the exit code `2`, though the route is still removed.
 
 ### Pinned ids
 
@@ -148,6 +153,7 @@ Register the server in your MCP client. For Claude Code, add it to the project's
 | `manifest_list_routes` | reads | List every route with its structural section and filled slots. |
 | `manifest_get_route` | reads | Get one route's full configuration. |
 | `manifest_set_route` | writes | Create or change one route. Supports `dryRun`. |
+| `manifest_remove_route` | writes | Remove one route (same as `remove-route`). Refuses a route that does not exist, and warns about each section no remaining route uses. Supports `dryRun`. |
 | `manifest_apply_batch` | writes | Apply several route patches, either all-or-nothing (`onError: "abort"`) or skipping invalid ones (`onError: "skip"`). Supports `dryRun`. |
 | `manifest_add_section` | writes | Declare a section in `entities.sections` (same as `add-section`). Supports `dryRun`. |
 | `manifest_rename_section` | writes | Rename a section everywhere in the manifest, and in its section file unless `manifestOnly: true` (same as `rename-section`). Supports `dryRun`. |
@@ -211,6 +217,7 @@ The write tools return the same JSON envelope as the CLI's `--json` output:
 
 - `changes[].status` is `applied`, `skipped` (invalid, with `onError: "skip"`), or `aborted` (the batch was rejected).
 - `before` and `after` are the route's configuration before and after the change, and `patch` is an RFC 6902 JSON Patch between them.
+- `manifest remove-route` returns the same frame with one change: `after` is `null`, and `patch` is a single `remove` whose path starts at the manifest root (`/routeConfigs/~1messages~1group-chats`), because the route itself is what goes. A refused removal has no changes and one entry in `errors`.
 
 The section tools, and the section subcommands with `--json`, return the same frame with section-specific fields:
 
