@@ -89,7 +89,12 @@ public class Program
             .Select(pair => pair.Folder));
         Option<bool> cleanOption = new(
             aliases: ["--clean"],
-            description: $"Delete orphaned documents (stored in RavenDB with no local file) from the collections of these collection folders: {cleanedCollections}. Entities and identities are never deleted. --layout, --exclude-collection and --exclude-layout narrow what it deletes.")
+            description: $"Delete orphaned documents (stored in RavenDB with no local file) from the collections of these collection folders: {cleanedCollections}. Entities and identities are never deleted unless --clean-records is passed. --layout, --exclude-collection and --exclude-layout narrow what it deletes.")
+        { IsRequired = false };
+
+        Option<bool> cleanRecordsOption = new(
+            aliases: ["--clean-records"],
+            description: "Extend --clean to entities and identities: delete every record that belongs only to the --layout layout (its layoutId, primaryLayoutId and layoutIds name that layout and no other) and that no local file declares, so the layout's records match its tree. For resetting a test database. Needs --clean, --layout and --sync-once (exit 1 otherwise), and runs only against a local RavenDB, even with --allow-remote-sync (exit 3 otherwise). See issue #62.")
         { IsRequired = false };
 
         Option<bool> verboseOption = new(
@@ -143,6 +148,7 @@ public class Program
             fixIdsOption,
             dryRunOption,
             cleanOption,
+            cleanRecordsOption,
             verboseOption,
             preserveIdsOption,
             strictOption,
@@ -173,6 +179,7 @@ public class Program
                     FixIds = context.ParseResult.GetValueForOption(fixIdsOption),
                     DryRun = context.ParseResult.GetValueForOption(dryRunOption),
                     Clean = context.ParseResult.GetValueForOption(cleanOption),
+                    CleanRecords = context.ParseResult.GetValueForOption(cleanRecordsOption),
                     Verbose = context.ParseResult.GetValueForOption(verboseOption),
                     PreserveIds = context.ParseResult.GetValueForOption(preserveIdsOption),
                     Strict = context.ParseResult.GetValueForOption(strictOption),
@@ -228,6 +235,14 @@ public class Program
                 Log.Information(
                     "Scoped clean active: orphan deletion filtered to layoutId='{Layout}'. Documents stored without a layoutId will be skipped — run unscoped --clean to prune those.",
                     args.Layout);
+            }
+
+            // --clean-records deletes user data, so a combination that could aim it at more than
+            // one layout's records, or at records an app keeps creating, dies here (issue #62).
+            if (RecordCleanup.ValidateArgs(args) is { } cleanRecordsError)
+            {
+                Log.Error("{CleanRecordsError}", cleanRecordsError);
+                return 1;
             }
 
             // Build host
@@ -385,6 +400,19 @@ public class Program
             {
                 return 3;
             }
+
+            // Checked after the general guard, and not lifted by --allow-remote-sync: records are
+            // user data no file can restore, so --clean-records only resets a local database.
+            if (args.CleanRecords && RecordCleanup.RefusesTarget(ravenOpts.Url))
+            {
+                Log.Error(
+                    "--clean-records refused: {Url} is not a local RavenDB. It deletes entities and identities, which no file can restore, so it runs only against a local database, with or without --allow-remote-sync.",
+                    ravenOpts.Url);
+                return 3;
+            }
+
+            if (args.CleanRecords)
+                Log.Warning("Record clean active: entities and identities of layoutId='{Layout}' that no local file declares will be deleted.", args.Layout);
 
             // Get sync service
             DocumentSyncService syncService = host.Services.GetRequiredService<DocumentSyncService>();

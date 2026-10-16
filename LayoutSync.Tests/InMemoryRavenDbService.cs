@@ -100,4 +100,48 @@ internal class InMemoryRavenDbService(ILogger<RavenDbService>? logger = null)
                         kvp.Key,
                         SyncDocument.ReadLayoutIdField(kvp.Value.Content),
                         kvp.Value.Content["identifier"]!.GetValue<string>())));
+
+    /// <summary>Mirrors the server-side filter: a record naming the layout in any of its three layout fields.</summary>
+    public override Task<IReadOnlyList<RecordCandidate>> GetRecordCandidatesAsync(
+        string collection,
+        string layoutId,
+        CancellationToken ct = default) =>
+        Task.FromResult<IReadOnlyList<RecordCandidate>>(
+        [
+            .. _documents
+                .Where(kvp => kvp.Value.Collection == collection)
+                .Where(kvp => NamesLayout(kvp.Value.Content, layoutId))
+                .Select(kvp => new RecordCandidate(
+                    kvp.Key,
+                    kvp.Value.Content["identifier"]?.GetValue<string>() ?? string.Empty,
+                    RecordCleanup.ReadLayoutRefs(kvp.Value.Content),
+                    ChangeVectorOf(kvp.Value.Content))),
+        ]);
+
+    /// <summary>
+    /// Deletes only while the content is the version the query read. The serialized content stands
+    /// in for RavenDB's change vector: any edit changes it, which is all the guard depends on.
+    /// </summary>
+    public override Task<bool> DeleteRecordAsync(string documentId, string? expectedChangeVector, CancellationToken ct = default) =>
+        Task.FromResult(
+            _documents.TryGetValue(documentId, out (string Collection, JsonObject Content) stored)
+            && ChangeVectorOf(stored.Content) == expectedChangeVector
+            && _documents.Remove(documentId));
+
+    private static string ChangeVectorOf(JsonObject content) => content.ToJsonString();
+
+    /// <summary>
+    /// The server filter (<c>layoutId = $l or primaryLayoutId = $l or layoutIds = $l</c>) read from
+    /// the raw JSON, independently of <see cref="RecordCleanup.ReadLayoutRefs"/>, so a record with
+    /// a malformed field still reaches the decision code, as it would from RavenDB.
+    /// </summary>
+    private static bool NamesLayout(JsonObject content, string layoutId)
+    {
+        return IsLayout(content["layoutId"])
+            || IsLayout(content["primaryLayoutId"])
+            || (content["layoutIds"] is JsonArray ids ? ids.Any(IsLayout) : IsLayout(content["layoutIds"]));
+
+        bool IsLayout(JsonNode? node) =>
+            node is JsonValue value && value.TryGetValue(out string? text) && text == layoutId;
+    }
 }

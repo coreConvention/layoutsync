@@ -58,9 +58,21 @@ Exit codes:
 | `0` | Success. |
 | `1` | Error: bad configuration or input, an I/O failure, or a rejected manifest change. |
 | `2` | `--strict` was set and the sync flagged a problem: a validator warning, a duplicate identifier, a document collision (two files that resolve to the same stored document), or a [pinned id mismatch](#pinned-ids). For `remove-route` and the section-registry subcommands, any warning counts. |
-| `3` | Refused to write to a non-local RavenDB server. Pass `--allow-remote-sync` if you mean it. |
+| `3` | Refused to write to a non-local RavenDB server. Pass `--allow-remote-sync` if you mean it. `--clean-records` is refused against a non-local server even then (see [Resetting a layout's records](#resetting-a-layouts-records)). |
 | `4` | Refused because the current directory is inside a git worktree but the layouts path points outside that worktree. Pass `--allow-cross-worktree-sync` if you mean it. LayoutSync asks git whether the directory is in a linked worktree, so the worktree can live anywhere; when git is not installed or cannot answer, it recognizes only directories under `.claude/worktrees/<name>/`. |
 | `5` | `--sync-once` finished, but one or more documents failed to sync: a layout file could not be read or parsed, writing its document to RavenDB failed, or `--clean` could not delete an orphan (the orphan stays in the database, and the next `--clean` tries again). Returned with or without `--strict` (and under `--dry-run`, for unreadable files), and takes precedence over `2`. |
+
+### Resetting a layout's records
+
+`--clean` deletes orphans (stored documents with no local file) from the static collections only. It never deletes entities or identities, because those are user data. To reset a **test** database so that one layout's records match its tree exactly, add `--clean-records`:
+
+```bash
+layoutsync --sync-once --preserve-ids --clean --clean-records --layout __conformance__
+```
+
+On top of the scoped clean, this deletes every entity and identity that belongs only to that layout and that no local file declares: records left by an earlier tree, and records an app created at runtime. A record belongs only to the layout when every layout it names in `layoutId`, `primaryLayoutId` and `layoutIds` is that layout, so an identity that is also a member of another layout is kept. A record counts as declared when its id or its `identifier` matches a local file. A record whose layout fields have an unexpected shape (a `layoutIds` that is not an array of strings, for example) is kept and reported. Each delete is made against the version the query read, so a record that changes in between, such as an identity that joins another layout, is not deleted.
+
+Guards: it needs `--clean`, `--layout` and `--sync-once` (exit `1` otherwise, so watch mode never deletes records an app creates between file saves), and it runs only against a local RavenDB, even with `--allow-remote-sync` (exit `3`). `--dry-run` lists what it would delete. `--exclude-collection entities` or `identities` leaves that collection alone. If any file cannot be read, the record clean is skipped, since that file may declare a record. A failed delete or query is a failed result (exit `5`).
 
 ### Removing a route
 

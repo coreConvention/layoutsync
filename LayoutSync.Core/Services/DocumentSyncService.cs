@@ -80,12 +80,17 @@ public class DocumentSyncService(
         Dictionary<string, HashSet<string>> syncedIdentifiers =
             BuildOrphanTracking(_cliArgs.ExcludeCollections);
 
+        // RavenDB matches ids and identifiers case-insensitively, so these sets do too.
+        HashSet<string> declaredRecordIds = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> declaredRecordIdentifiers = new(StringComparer.OrdinalIgnoreCase);
+
         // Read every file BEFORE the first write, so which file owns which stored document is
         // settled for the whole run up front: files that declare the same document are refused
         // whatever order they are discovered in — and discovery order differs between fresh CI
         // checkouts, which is what made #28 flip from one sync to the next.
         List<SyncDocument> docs = [];
         int fileCount = 0;
+        int unreadFileCount = 0;
         foreach (string filePath in _fileService.DiscoverFiles(
             layoutsPath, layout, _cliArgs.ExcludeCollections, _cliArgs.ExcludeLayouts))
         {
@@ -96,6 +101,7 @@ public class DocumentSyncService(
             SyncDocument? doc = await _fileService.ReadDocumentAsync(filePath, layoutsPath);
             if (doc == null)
             {
+                unreadFileCount++;
                 batch.Results.Add(ReadFailure(filePath));
                 continue;
             }
@@ -137,12 +143,24 @@ public class DocumentSyncService(
                         syncedIdentifiers[collection].Add(OrphanTrackingKey(string.Empty, identifier));
                 }
             }
+
+            // Records this run's files declare, for --clean-records (issue #62): every id the file
+            // resolved to or pins, and its identifier, whether or not its write succeeded.
+            if (RecordCleanup.RecordTypes.Contains(result.Document.DocumentType))
+            {
+                AddIfPresent(declaredRecordIds, result.RavenDocumentId);
+                AddIfPresent(declaredRecordIds, result.Document.Id);
+                AddIfPresent(declaredRecordIdentifiers, result.Document.Identifier);
+            }
         }
 
         DocumentCollisionCount = claims.CollisionCount;
 
         // Always detect orphans in static collections (deletion is conditional on cleanOrphans flag)
         await DetectOrphansAsync(batch, syncedIdentifiers, cleanOrphans, dryRun, ct);
+
+        if (cleanOrphans && _cliArgs.CleanRecords && !string.IsNullOrEmpty(layout) && !ct.IsCancellationRequested)
+            await CleanOrphanRecordsAsync(batch, layout, declaredRecordIds, declaredRecordIdentifiers, unreadFileCount, dryRun, ct);
 
         // Batch-end phase: stateful, multi-phase validators run their deferred cross-check now
         // that every file has been inspected (e.g. cross-reference emits one WARN per offending
@@ -562,6 +580,100 @@ public class DocumentSyncService(
                 _logger.LogInformation("{Count} orphan(s) detected in {Collection}. Use --clean to remove.", orphans.Count, collection);
             }
         }
+    }
+
+    /// <summary>
+    /// <c>--clean-records</c> (issue #62): deletes the entities and identities that belong only to
+    /// <paramref name="layoutId"/> and that no file of this run declares (<see cref="RecordCleanup.SelectOrphans"/>),
+    /// so the layout's records end up exactly what its tree defines. Records are reported and
+    /// counted like static orphans: each one in <see cref="SyncBatchResult.OrphansDetected"/>, a
+    /// delete as <see cref="SyncAction.OrphanDeleted"/>, a failed delete as a failed result (exit 5).
+    /// </summary>
+    /// <remarks>
+    /// Runs only after a full read of the tree: a file that could not be read may declare a record,
+    /// and nothing can tell which, so any unread file skips the whole record clean (the run already
+    /// fails on that file). A query that fails is a failed result too, never a clean that found
+    /// nothing. A collection excluded with <c>--exclude-collection</c> is left alone.
+    /// </remarks>
+    private async Task CleanOrphanRecordsAsync(
+        SyncBatchResult batch,
+        string layoutId,
+        IReadOnlySet<string> declaredIds,
+        IReadOnlySet<string> declaredIdentifiers,
+        int unreadFileCount,
+        bool dryRun,
+        CancellationToken ct)
+    {
+        if (unreadFileCount > 0)
+        {
+            _logger.LogWarning(
+                "--clean-records skipped: {Count} file(s) could not be read, and a record they declare could be deleted by mistake. Fix the files and run again.",
+                unreadFileCount);
+            return;
+        }
+
+        HashSet<string> excluded = new(_cliArgs.ExcludeCollections, StringComparer.OrdinalIgnoreCase);
+        foreach ((string folder, DocumentType type) in CollectionFolders.Ordered)
+        {
+            if (!RecordCleanup.RecordTypes.Contains(type) || excluded.Contains(folder) || ct.IsCancellationRequested)
+                continue;
+
+            string collection = type.GetCollection();
+            IReadOnlyList<RavenDbService.RecordCandidate> candidates;
+            try
+            {
+                candidates = await _ravenService.GetRecordCandidatesAsync(collection, layoutId, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "--clean-records could not query {Collection} for layoutId '{Layout}'", collection, layoutId);
+                batch.Results.Add(SyncResult.Failed(
+                    new SyncDocument { DocumentType = type }, SyncAction.OrphanDeleted, $"Could not query {collection}: {ex.Message}", ex));
+                continue;
+            }
+
+            foreach (RavenDbService.RecordCandidate unreadable in candidates.Where(c => c.LayoutRefs is null))
+            {
+                _logger.LogWarning(
+                    "--clean-records kept {DocId} in {Collection}: its layoutId, primaryLayoutId or layoutIds has an unexpected shape, so which layouts it belongs to cannot be read",
+                    unreadable.DocumentId, collection);
+            }
+
+            IReadOnlyList<RavenDbService.RecordCandidate> orphans =
+                RecordCleanup.SelectOrphans(candidates, layoutId, declaredIds, declaredIdentifiers);
+            if (orphans.Count == 0)
+                continue;
+
+            batch.OrphansDetected[collection] = orphans.ToDictionary(o => o.DocumentId, o => o.Identifier);
+            foreach (RavenDbService.RecordCandidate record in orphans)
+            {
+                if (dryRun)
+                {
+                    _logger.LogWarning("Would delete orphan record: {Identifier} ({DocId}) from {Collection}", record.Identifier, record.DocumentId, collection);
+                    continue;
+                }
+
+                SyncDocument orphan = new() { Identifier = record.Identifier, DocumentType = type };
+                // Against the version the query judged: a record that changed since (say, joined
+                // another layout) is refused and reported as a failed delete, never deleted blind.
+                if (await _ravenService.DeleteRecordAsync(record.DocumentId, record.ChangeVector, ct))
+                {
+                    _logger.LogWarning("Deleted orphan record: {Identifier} ({DocId}) from {Collection}", record.Identifier, record.DocumentId, collection);
+                    batch.Results.Add(SyncResult.Succeeded(orphan, SyncAction.OrphanDeleted, record.DocumentId));
+                }
+                else
+                {
+                    _logger.LogError("Failed to delete orphan record: {Identifier} ({DocId}) from {Collection}", record.Identifier, record.DocumentId, collection);
+                    batch.Results.Add(SyncResult.Failed(orphan, SyncAction.OrphanDeleted, "Delete operation returned false"));
+                }
+            }
+        }
+    }
+
+    private static void AddIfPresent(HashSet<string> set, string? value)
+    {
+        if (!string.IsNullOrEmpty(value))
+            set.Add(value);
     }
 
     /// <summary>

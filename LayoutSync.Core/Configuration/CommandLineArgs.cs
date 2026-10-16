@@ -19,6 +19,13 @@ public class CommandLineArgs
     public bool FixIds { get; init; }
     public bool DryRun { get; init; }
     public bool Clean { get; init; }
+
+    /// <summary>
+    /// <c>--clean-records</c>: extends a scoped <c>--clean</c> to the scoped layout's entities and
+    /// identities (issue #62). Allowed only as <c>RecordCleanup.ValidateArgs</c> and
+    /// <c>RecordCleanup.RefusesTarget</c> say.
+    /// </summary>
+    public bool CleanRecords { get; init; }
     public bool Verbose { get; init; }
     public bool PreserveIds { get; init; }
     public bool Strict { get; init; }
