@@ -643,6 +643,92 @@ public class RavenDbService : IDisposable
   public sealed record OrphanCandidate(string DocumentId, string? LayoutId, string Identifier = "");
 
   /// <summary>
+  /// A stored entity or identity that <c>--clean-records</c> may delete (issue #62):
+  /// <see cref="LayoutRefs"/> is every layout it names (<see cref="RecordCleanup.ReadLayoutRefs"/>),
+  /// and <see cref="Identifier"/> is empty when it has none, as records created at runtime often do.
+  /// <see cref="LayoutRefs"/> is null when a layout field has an unexpected shape, which makes the
+  /// record ineligible. <see cref="ChangeVector"/> is the version the query read, so a delete can
+  /// refuse a record that changed after it was judged (for example, joined another layout).
+  /// </summary>
+  public sealed record RecordCandidate(string DocumentId, string Identifier, IReadOnlySet<string>? LayoutRefs, string? ChangeVector = null);
+
+  /// <summary>
+  /// Gets every record in <paramref name="collection"/> (<c>entities</c> or <c>identities</c>)
+  /// that names <paramref name="layoutId"/> in its <c>layoutId</c>, its <c>primaryLayoutId</c> or
+  /// its <c>layoutIds</c>, as a <see cref="RecordCandidate"/>. Filtered on the server, so a run never
+  /// reads the other layouts' records. Whether a candidate belongs ONLY to that layout is decided
+  /// afterwards by <see cref="RecordCleanup.SelectOrphans"/>.
+  /// </summary>
+  /// <remarks>
+  /// Unlike <see cref="GetAllOrphanCandidatesAsync"/>, a failed query throws instead of returning
+  /// an empty result: the caller must report a clean that could not run, not treat it as a clean
+  /// that found nothing. Waits for a non-stale index, because the query runs right after this
+  /// run's own writes and the records the caller must see may have been written just before it.
+  /// </remarks>
+  public virtual async Task<IReadOnlyList<RecordCandidate>> GetRecordCandidatesAsync(
+    string collection,
+    string layoutId,
+    CancellationToken ct = default
+  )
+  {
+    using IAsyncDocumentSession session = _store.OpenAsyncSession();
+    List<BlittableJsonReaderObject> documents = await session
+      .Advanced.AsyncRawQuery<BlittableJsonReaderObject>(
+        $"from {collection} where layoutId = $layout or primaryLayoutId = $layout or layoutIds = $layout")
+      .AddParameter("layout", layoutId)
+      .WaitForNonStaleResults(TimeSpan.FromSeconds(30))
+      .ToListAsync(ct);
+
+    List<RecordCandidate> candidates = [];
+    foreach (BlittableJsonReaderObject item in documents)
+    {
+      string? documentId = session.Advanced.GetDocumentId(item);
+      if (string.IsNullOrEmpty(documentId))
+        continue;
+
+      JsonObject? json = ToJsonObject(item);
+      string identifier = json?["identifier"] is JsonValue value && value.TryGetValue(out string? text) ? text : string.Empty;
+      candidates.Add(new RecordCandidate(
+        documentId, identifier, RecordCleanup.ReadLayoutRefs(json), session.Advanced.GetChangeVectorFor(item)));
+    }
+
+    return candidates;
+  }
+
+  /// <summary>
+  /// Deletes a record only if it is still the version <paramref name="expectedChangeVector"/> names
+  /// (issue #62). An id-only delete would remove whatever the record has become since it was read,
+  /// such as an identity that has since joined another layout; with the change vector, RavenDB
+  /// refuses that delete with a concurrency error, and this returns false, as any failed delete does.
+  /// </summary>
+  public virtual async Task<bool> DeleteRecordAsync(string documentId, string? expectedChangeVector, CancellationToken ct = default)
+  {
+    if (string.IsNullOrEmpty(expectedChangeVector))
+    {
+      _logger.LogError("Refusing to delete record {DocumentId}: the query returned no change vector to delete it against", documentId);
+      return false;
+    }
+
+    using IAsyncDocumentSession session = _store.OpenAsyncSession();
+    try
+    {
+      session.Delete(documentId, expectedChangeVector);
+      await session.SaveChangesAsync(ct);
+      return true;
+    }
+    catch (ConcurrencyException ex)
+    {
+      _logger.LogError(ex, "Record {DocumentId} changed after it was read, so it was not deleted", documentId);
+      return false;
+    }
+    catch (Exception ex)
+    {
+      _logger.LogError(ex, "Error deleting record: {DocumentId}", documentId);
+      return false;
+    }
+  }
+
+  /// <summary>
   /// Gets every document in a static collection as an <see cref="OrphanCandidate"/>
   /// (identifier + stored <c>layoutId</c>), keyed by its unique RavenDB document id.
   /// Used for orphan detection in static collections.
