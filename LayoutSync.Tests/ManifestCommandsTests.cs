@@ -5,13 +5,14 @@ using Xunit;
 namespace LayoutSync.Tests;
 
 /// <summary>
-/// Drives the section subcommands through System.CommandLine, the way the CLI runs them, to
-/// pin what the service tests cannot see: flag-to-parameter mapping (<c>--manifest-only</c>
-/// is inverted into "update the section file") and exit codes. Kept in one class on purpose:
-/// the handlers reconfigure Serilog's static logger, and xunit runs one class's tests in
-/// sequence.
+/// Drives the section subcommands and <c>remove-route</c> through System.CommandLine, the way
+/// the CLI runs them, to pin what the service tests cannot see: flag-to-parameter mapping
+/// (<c>--manifest-only</c> is inverted into "update the section file"), the <c>--json</c>
+/// envelope on stdout, and exit codes. Kept in one class on purpose: the handlers reconfigure
+/// Serilog's static logger and write to the process console, and xunit runs one class's tests
+/// in sequence.
 /// </summary>
-public class ManifestSectionCommandsTests : IDisposable
+public class ManifestCommandsTests : IDisposable
 {
     private readonly string _tempRoot;
     private readonly string _layoutsPath;
@@ -19,7 +20,7 @@ public class ManifestSectionCommandsTests : IDisposable
     private readonly string _sectionPath;
     private const string LayoutId = "test-layout";
 
-    public ManifestSectionCommandsTests()
+    public ManifestCommandsTests()
     {
         _tempRoot = Path.Combine(Path.GetTempPath(), $"section-commands-tests-{Guid.NewGuid()}");
         _layoutsPath = Path.Combine(_tempRoot, "layouts");
@@ -123,6 +124,71 @@ public class ManifestSectionCommandsTests : IDisposable
         int exitCode = await RunAsync("add-section", "hero");
 
         Assert.Equal(1, exitCode);
+    }
+
+    // ───── remove-route (issue #64) ─────
+
+    [Fact]
+    public async Task RemoveRoute_RemovesTheRoute()
+    {
+        int exitCode = await RunAsync("remove-route", "/");
+
+        // The route's only section is now unused, which is only a warning without --strict.
+        Assert.Equal(0, exitCode);
+        Assert.Empty(ReadManifest()["routeConfigs"]!.AsObject());
+        // The section stays declared.
+        Assert.Single(ReadManifest()["entities"]!["sections"]!.AsArray());
+    }
+
+    [Fact]
+    public async Task RemoveRoute_Strict_ExitsTwoWhenASectionIsLeftUnused()
+    {
+        int exitCode = await RunAsync("remove-route", "/", "--strict");
+
+        Assert.Equal(2, exitCode);
+        Assert.Empty(ReadManifest()["routeConfigs"]!.AsObject());
+    }
+
+    [Fact]
+    public async Task RemoveRoute_ExitsOneAndWritesNothingForAMissingRoute()
+    {
+        string manifestBefore = File.ReadAllText(_manifestPath);
+
+        int exitCode = await RunAsync("remove-route", "/nope");
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(manifestBefore, File.ReadAllText(_manifestPath));
+    }
+
+    [Fact]
+    public async Task RemoveRoute_DryRunJson_PrintsTheEnvelopeAndWritesNothing()
+    {
+        string manifestBefore = File.ReadAllText(_manifestPath);
+        StringWriter stdout = new();
+        TextWriter original = Console.Out;
+        Console.SetOut(stdout);
+        int exitCode;
+        try
+        {
+            exitCode = await RunAsync("remove-route", "/", "--dry-run", "--json");
+        }
+        finally
+        {
+            Console.SetOut(original);
+        }
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(manifestBefore, File.ReadAllText(_manifestPath));
+
+        JsonObject envelope = JsonNode.Parse(stdout.ToString())!.AsObject();
+        Assert.Equal("manifest remove-route", envelope["command"]?.GetValue<string>());
+        Assert.Equal(_manifestPath, envelope["manifestPath"]?.GetValue<string>());
+        Assert.True(envelope["dryRun"]?.GetValue<bool>());
+        JsonObject change = Assert.Single(envelope["changes"]!.AsArray())!.AsObject();
+        Assert.Equal("hero", change["before"]?["structuralSection"]?.GetValue<string>());
+        Assert.Equal("/routeConfigs/~1", change["patch"]?[0]?["path"]?.GetValue<string>());
+        Assert.Contains("'hero'", Assert.Single(envelope["warnings"]!.AsArray())!.GetValue<string>());
+        Assert.Empty(envelope["errors"]!.AsArray());
     }
 
     /// <summary>

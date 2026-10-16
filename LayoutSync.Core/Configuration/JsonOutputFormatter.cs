@@ -13,7 +13,7 @@ namespace LayoutSync.Configuration;
 /// Route envelope shape (<see cref="MutationResult"/>):
 /// <code>
 /// {
-///   "command":      "manifest set-route" | "manifest from-json" | "manifest apply-batch",
+///   "command":      "manifest set-route" | "manifest from-json" | "manifest apply-batch" | "manifest remove-route",
 ///   "layoutId":     "dirt-life",
 ///   "manifestPath": "/abs/path/layouts/dirt-life/manifests/layout-manifest.json" | null,
 ///   "dryRun":       true | false,
@@ -32,6 +32,10 @@ namespace LayoutSync.Configuration;
 ///   "errors":   [ "string", ... ]
 /// }
 /// </code>
+///
+/// For <c>manifest remove-route</c>, <c>after</c> is <c>null</c> and <c>patch</c> is a single
+/// <c>remove</c> whose path starts at the manifest root (<c>/routeConfigs/~1events</c>); the other
+/// commands' patch paths are relative to the route.
 ///
 /// <c>manifestPath</c> (issue #29) names the file the command read and wrote. With several
 /// git worktrees on disk the same <c>layoutId</c> maps to a different file in each, so
