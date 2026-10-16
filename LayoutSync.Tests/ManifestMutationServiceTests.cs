@@ -407,7 +407,153 @@ public class ManifestMutationServiceTests : IDisposable
             """), File.ReadAllText(ManifestPath()));
     }
 
+    // ───── remove-route (issue #64) ─────
+
+    [Fact]
+    public async Task RemoveRouteAsync_RemovesTheRoute_ReportingBeforeAndARootRelativeRemoveOp()
+    {
+        WriteFixture(TwoRouteFixture);
+
+        MutationResult result = await _service.RemoveRouteAsync(
+            _layoutsPath, LayoutId, "/messages/group-chats", dryRun: false);
+
+        Assert.True(result.Success);
+        Assert.Empty(result.Errors);
+        Assert.Equal(ManifestPath(), result.ManifestPath);
+        RouteChange change = Assert.Single(result.Changes);
+        Assert.Equal(RouteChangeStatus.Applied, change.Status);
+        Assert.Equal("/messages/group-chats", change.Route);
+        Assert.Equal("full-width-layout", change.Before?["structuralSection"]?.GetValue<string>());
+        Assert.Null(change.After);
+        JsonObject op = Assert.Single(change.Patch!)!.AsObject();
+        Assert.Equal("remove", op["op"]?.GetValue<string>());
+        Assert.Equal("/routeConfigs/~1messages~1group-chats", op["path"]?.GetValue<string>());
+
+        JsonObject routeConfigs = ReadManifest()["routeConfigs"]!.AsObject();
+        Assert.False(routeConfigs.ContainsKey("/messages/group-chats"));
+        Assert.True(routeConfigs.ContainsKey("/messages"));
+    }
+
+    [Fact]
+    public async Task RemoveRouteAsync_WarnsOnlyForSectionsNoRemainingRouteReferences()
+    {
+        WriteFixture(TwoRouteFixture);
+
+        MutationResult result = await _service.RemoveRouteAsync(
+            _layoutsPath, LayoutId, "/messages/group-chats", dryRun: true);
+
+        // full-width-layout: still used by /messages, so no warning.
+        // group-chat-list: named twice by the route, by nothing else: one remove-section hint.
+        // group-chat-empty: still named by routing.notFoundSection, so "keep it".
+        Assert.Equal(2, result.Warnings.Count);
+        Assert.Contains("'group-chat-list'", result.Warnings[0]);
+        Assert.Contains("remove-section", result.Warnings[0]);
+        Assert.Contains("'group-chat-empty'", result.Warnings[1]);
+        Assert.Contains("/routing/notFoundSection", result.Warnings[1]);
+        Assert.DoesNotContain(result.Warnings, w => w.Contains("full-width-layout"));
+    }
+
+    [Fact]
+    public async Task RemoveRouteAsync_DryRun_WritesNothing()
+    {
+        WriteFixture(TwoRouteFixture);
+        string before = File.ReadAllText(ManifestPath());
+
+        MutationResult result = await _service.RemoveRouteAsync(
+            _layoutsPath, LayoutId, "/messages/group-chats", dryRun: true);
+
+        Assert.True(result.Success);
+        Assert.Single(result.Changes);
+        Assert.Equal(before, File.ReadAllText(ManifestPath()));
+    }
+
+    [Fact]
+    public async Task RemoveRouteAsync_RefusesAMissingRoute_WithSuggestions_AndWritesNothing()
+    {
+        WriteFixture(TwoRouteFixture);
+        string before = File.ReadAllText(ManifestPath());
+
+        MutationResult result = await _service.RemoveRouteAsync(
+            _layoutsPath, LayoutId, "/messages/group-chat", dryRun: false);
+
+        Assert.False(result.Success);
+        Assert.Empty(result.Changes);
+        string error = Assert.Single(result.Errors);
+        Assert.Contains("/messages/group-chat is not in routeConfigs", error);
+        Assert.Contains("Did you mean: /messages/group-chats", error);
+        Assert.Equal(ManifestPath(), result.ManifestPath);
+        Assert.Equal(before, File.ReadAllText(ManifestPath()));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task RemoveRouteAsync_RefusesAnEmptyRoute(string route)
+    {
+        WriteFixture(TwoRouteFixture);
+
+        MutationResult result = await _service.RemoveRouteAsync(_layoutsPath, LayoutId, route, dryRun: false);
+
+        Assert.False(result.Success);
+        Assert.Contains("must not be empty", Assert.Single(result.Errors));
+    }
+
+    [Fact]
+    public async Task RemoveRouteAsync_ManifestWithoutRouteConfigs_RefusesWithoutCreatingIt()
+    {
+        WriteFixture("""{ "identifier": "test-layout" }""");
+
+        MutationResult result = await _service.RemoveRouteAsync(_layoutsPath, LayoutId, "/events", dryRun: false);
+
+        Assert.False(result.Success);
+        Assert.Contains("is not in routeConfigs", Assert.Single(result.Errors));
+        Assert.False(ReadManifest().ContainsKey("routeConfigs"));
+    }
+
+    [Fact]
+    public async Task RemoveRouteAsync_MissingManifest_ErrorNamesThePath()
+    {
+        MutationResult result = await _service.RemoveRouteAsync(_layoutsPath, LayoutId, "/events", dryRun: false);
+
+        Assert.False(result.Success);
+        Assert.Contains(ManifestPath(), Assert.Single(result.Errors));
+        Assert.Equal(ManifestPath(), result.ManifestPath);
+    }
+
     // ───── helpers ─────
+
+    private JsonObject ReadManifest() => JsonNode.Parse(File.ReadAllText(ManifestPath()))!.AsObject();
+
+    /// <summary>
+    /// Two routes sharing a structural section, plus a section the route under test shares
+    /// with a non-route field, so all three warning outcomes of remove-route are reachable.
+    /// </summary>
+    private const string TwoRouteFixture = """
+        {
+          "identifier": "test-layout",
+          "entities": {
+            "sections": [
+              { "identifier": "full-width-layout", "type": "ui-schema-section" },
+              { "identifier": "inbox-list", "type": "ui-schema-section" },
+              { "identifier": "group-chat-list", "type": "ui-schema-section" },
+              { "identifier": "group-chat-empty", "type": "ui-schema-section" }
+            ]
+          },
+          "routing": { "notFoundSection": "group-chat-empty" },
+          "routeConfigs": {
+            "/messages": {
+              "structuralSection": "full-width-layout",
+              "patches": [ { "targetElementId": "main", "sectionIdentifiers": ["inbox-list"] } ]
+            },
+            "/messages/group-chats": {
+              "structuralSection": "full-width-layout",
+              "patches": [
+                { "targetElementId": "main", "sectionIdentifiers": ["group-chat-list", "group-chat-empty", "group-chat-list"] }
+              ]
+            }
+          }
+        }
+        """;
 
     /// <summary>
     /// <paramref name="json"/> as the manifest writer lays it out on disk: its line endings

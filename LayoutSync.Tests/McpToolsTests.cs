@@ -424,8 +424,8 @@ public class McpToolsTests : IDisposable
             .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
             .ToArray();
 
-        // 5 route/read tools (#29) + 3 section-registry tools (#30).
-        Assert.Equal(8, toolMethods.Length);
+        // 5 route/read tools (#29) + 3 section-registry tools (#30) + manifest_remove_route (#64).
+        Assert.Equal(9, toolMethods.Length);
         foreach (MethodInfo method in toolMethods)
         {
             ParameterInfo? parameter = method.GetParameters().SingleOrDefault(p => p.Name == "layoutsPath");
@@ -438,6 +438,98 @@ public class McpToolsTests : IDisposable
             Assert.Contains("layoutsPath", description);
             Assert.Contains("manifestPath", description);
         }
+    }
+
+    // ───── manifest_remove_route (issue #64) ─────
+
+    [Fact]
+    public async Task ManifestRemoveRoute_ReturnsTheSetRouteEnvelopeShape()
+    {
+        WriteFixture();
+        ManifestTools tools = new(_mutationService, _pathProvider);
+
+        string output = await tools.ManifestRemoveRoute(LayoutId, "/events", dryRun: true, layoutsPath: _layoutsPath);
+
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+        Assert.Equal("manifest remove-route", envelope["command"]?.GetValue<string>());
+        Assert.Equal(LayoutId, envelope["layoutId"]?.GetValue<string>());
+        Assert.Equal(ManifestPathIn(_layoutsPath), envelope["manifestPath"]?.GetValue<string>());
+        Assert.True(envelope["dryRun"]?.GetValue<bool>());
+        Assert.True(envelope["success"]?.GetValue<bool>());
+        JsonObject change = Assert.Single(envelope["changes"]!.AsArray())!.AsObject();
+        Assert.Equal("/events", change["route"]?.GetValue<string>());
+        Assert.Equal("applied", change["status"]?.GetValue<string>());
+        Assert.Equal("sidebar-layout", change["before"]?["structuralSection"]?.GetValue<string>());
+        Assert.Null(change["after"]);
+        JsonObject op = Assert.Single(change["patch"]!.AsArray())!.AsObject();
+        Assert.Equal("remove", op["op"]?.GetValue<string>());
+        Assert.Equal("/routeConfigs/~1events", op["path"]?.GetValue<string>());
+        Assert.Empty(envelope["errors"]!.AsArray());
+        // /events was the fixture's only route, so each of its four sections is now unused.
+        Assert.Equal(4, envelope["warnings"]!.AsArray().Count);
+        Assert.Equal(StandardFixture, File.ReadAllText(ManifestPathIn(_layoutsPath)));
+    }
+
+    [Fact]
+    public async Task ManifestRemoveRoute_RefusesAMissingRoute()
+    {
+        WriteFixture();
+        ManifestTools tools = new(_mutationService, _pathProvider);
+
+        string output = await tools.ManifestRemoveRoute(LayoutId, "/event", layoutsPath: _layoutsPath);
+
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+        Assert.False(envelope["success"]?.GetValue<bool>());
+        Assert.Empty(envelope["changes"]!.AsArray());
+        Assert.Contains("Did you mean: /events",
+            Assert.Single(envelope["errors"]!.AsArray())!.GetValue<string>());
+        Assert.Equal(StandardFixture, File.ReadAllText(ManifestPathIn(_layoutsPath)));
+    }
+
+    [Fact]
+    public async Task ManifestRemoveRoute_WithLayoutsPath_WritesThatCheckoutAndLeavesDefaultUntouched()
+    {
+        WriteFixture();
+        string otherLayouts = WriteFixtureInOtherCheckout();
+        ManifestTools tools = new(_mutationService, _pathProvider);
+
+        string output = await tools.ManifestRemoveRoute(
+            LayoutId, "/events", layoutsPath: Path.GetDirectoryName(otherLayouts)); // checkout-root form
+
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+        Assert.True(envelope["success"]?.GetValue<bool>());
+        Assert.Equal(ManifestPathIn(otherLayouts), envelope["manifestPath"]?.GetValue<string>());
+        Assert.DoesNotContain("/events", File.ReadAllText(ManifestPathIn(otherLayouts)));
+        Assert.Equal(StandardFixture, File.ReadAllText(ManifestPathIn(_layoutsPath)));
+    }
+
+    [Theory]
+    [InlineData(true, "targeted")]
+    [InlineData(false, "wrote to")]
+    public async Task ManifestRemoveRoute_WithoutLayoutsPath_WarnsWhichDefaultFileItUsed(bool dryRun, string verb)
+    {
+        WriteFixture();
+        ManifestTools tools = new(_mutationService, _pathProvider);
+
+        string output = await tools.ManifestRemoveRoute(LayoutId, "/events", dryRun: dryRun);
+
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+        string defaultManifest = ManifestPathIn(_layoutsPath);
+        // The default-target warning comes after the service's unused-section warnings.
+        string warning = envelope["warnings"]!.AsArray()[^1]!.GetValue<string>();
+        Assert.Contains("layoutsPath was not passed", warning);
+        Assert.Contains($"{verb} {defaultManifest}", warning);
+    }
+
+    [Fact]
+    public async Task ManifestRemoveRoute_RelativeLayoutsPath_IsRejectedBeforeAnyWrite()
+    {
+        WriteFixture();
+        ManifestTools tools = new(_mutationService, _pathProvider);
+
+        await Assert.ThrowsAsync<McpException>(() => tools.ManifestRemoveRoute(LayoutId, "/events", layoutsPath: "layouts"));
+
+        Assert.Equal(StandardFixture, File.ReadAllText(ManifestPathIn(_layoutsPath)));
     }
 
     // ───── section registry tools (issue #30) ─────

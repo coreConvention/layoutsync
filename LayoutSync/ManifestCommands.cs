@@ -15,8 +15,8 @@ using Serilog.Events;
 namespace LayoutSync;
 
 /// <summary>
-/// CLI surface for <c>layoutsync manifest set-route</c> / <c>from-json</c> (route
-/// configurations) and <c>add-section</c> / <c>rename-section</c> / <c>remove-section</c>
+/// CLI surface for <c>layoutsync manifest set-route</c> / <c>from-json</c> / <c>remove-route</c>
+/// (route configurations) and <c>add-section</c> / <c>rename-section</c> / <c>remove-section</c>
 /// (the <c>entities.sections</c> registry). Lives in the exe project (not
 /// <c>LayoutSync.Core</c>) because System.CommandLine is an exe-only concern.
 ///
@@ -47,6 +47,7 @@ public static class ManifestCommands
         Command parent = new("manifest", "Mutate layout-manifest.json: route configurations and the entities.sections registry.");
         parent.AddCommand(BuildSetRouteCommand());
         parent.AddCommand(BuildFromJsonCommand());
+        parent.AddCommand(BuildRemoveRouteCommand());
         parent.AddCommand(BuildAddSectionCommand());
         parent.AddCommand(BuildRenameSectionCommand());
         parent.AddCommand(BuildRemoveSectionCommand());
@@ -204,6 +205,31 @@ public static class ManifestCommands
         return cmd;
     }
 
+    // ───── remove-route ─────
+
+    private static Command BuildRemoveRouteCommand()
+    {
+        Argument<string> routeArg = new(
+            name: "route",
+            description: "The route key to remove from routeConfigs (e.g. /messages/group-chats). Must exist.");
+
+        ManifestCommandOptions common = new();
+        Command cmd = new(
+            "remove-route",
+            "Remove a route from routeConfigs. Refuses a route that does not exist. Sections the route used stay declared in entities.sections; each one no remaining route references is reported as a warning.");
+        cmd.AddArgument(routeArg);
+        common.AddTo(cmd);
+
+        cmd.SetHandler(async (InvocationContext context) =>
+        {
+            ManifestRunArgs args = common.Read(context.ParseResult);
+            string route = context.ParseResult.GetValueForArgument(routeArg);
+            context.ExitCode = await RunRemoveRouteAsync(route, args);
+        });
+
+        return cmd;
+    }
+
     // ───── add-section / rename-section / remove-section ─────
 
     private static Command BuildAddSectionCommand()
@@ -224,7 +250,7 @@ public static class ManifestCommands
             aliases: ["--description"],
             description: "Description stored on the registry entry. Omitted when not given.");
 
-        SectionCommandOptions common = new();
+        ManifestCommandOptions common = new();
         Command cmd = new("add-section", "Declare a new section in entities.sections so routes can reference it.");
         cmd.AddArgument(identifierArg);
         cmd.AddOption(typeOpt);
@@ -235,7 +261,7 @@ public static class ManifestCommands
         cmd.SetHandler(async (InvocationContext context) =>
         {
             ParseResult parse = context.ParseResult;
-            SectionRunArgs args = common.Read(parse);
+            ManifestRunArgs args = common.Read(parse);
             SectionEntryInput entry = new(
                 Identifier: parse.GetValueForArgument(identifierArg),
                 Type: parse.GetValueForOption(typeOpt),
@@ -265,7 +291,7 @@ public static class ManifestCommands
             aliases: ["--manifest-only"],
             description: "Rename only inside layout-manifest.json. The section file keeps its old identifier, which is reported as a warning. Use it when the section file can't be updated.");
 
-        SectionCommandOptions common = new();
+        ManifestCommandOptions common = new();
         Command cmd = new(
             "rename-section",
             "Rename a section in one write: its entities.sections entry and every manifest field that references it. Also rewrites the section file's own identifier unless --manifest-only, and refuses (writing nothing) if that file can't be updated.");
@@ -277,7 +303,7 @@ public static class ManifestCommands
         cmd.SetHandler(async (InvocationContext context) =>
         {
             ParseResult parse = context.ParseResult;
-            SectionRunArgs args = common.Read(parse);
+            ManifestRunArgs args = common.Read(parse);
             string identifier = parse.GetValueForArgument(identifierArg);
             string newIdentifier = parse.GetValueForArgument(newIdentifierArg);
             bool updateSectionFile = !parse.GetValueForOption(manifestOnlyOpt);
@@ -302,7 +328,7 @@ public static class ManifestCommands
             aliases: ["--force"],
             description: "Remove the entry even while manifest fields still reference it. Those references are left dangling and reported as warnings.");
 
-        SectionCommandOptions common = new();
+        ManifestCommandOptions common = new();
         Command cmd = new(
             "remove-section",
             "Remove a section from entities.sections. Refuses while any manifest field still references it, unless --force. The section file is not deleted.");
@@ -313,7 +339,7 @@ public static class ManifestCommands
         cmd.SetHandler(async (InvocationContext context) =>
         {
             ParseResult parse = context.ParseResult;
-            SectionRunArgs args = common.Read(parse);
+            ManifestRunArgs args = common.Read(parse);
             string identifier = parse.GetValueForArgument(identifierArg);
             bool force = parse.GetValueForOption(forceOpt);
 
@@ -437,6 +463,52 @@ public static class ManifestCommands
         }
     }
 
+    private static async Task<int> RunRemoveRouteAsync(string route, ManifestRunArgs args)
+    {
+        ConfigureLogging(args.Verbose, args.Json);
+        try
+        {
+            string layoutsPath = ResolveLayoutsPath(args.LayoutsPath);
+
+            using IHost host = BuildManifestHost();
+
+            // Worktree-mismatch guard (issue #526) — same wiring as set-route: refuse with
+            // exit 4 before the manifest is read or written.
+            WorktreePathGuard worktreeGuard = host.Services.GetRequiredService<WorktreePathGuard>();
+            if (!worktreeGuard.Authorize(
+                    currentDirectory: Directory.GetCurrentDirectory(),
+                    layoutsPath: layoutsPath,
+                    allowCrossWorktreeSync: args.AllowCrossWorktreeSync))
+            {
+                return 4;
+            }
+
+            ManifestMutationService service = host.Services.GetRequiredService<ManifestMutationService>();
+            MutationResult result = await service.RemoveRouteAsync(layoutsPath, args.LayoutId, route, args.DryRun);
+
+            EmitOutput("manifest remove-route", args.LayoutId, args.DryRun, args.Json, result);
+
+            // Exit codes match the section subcommands: 1 refused, 2 under --strict when the
+            // removal left a warning (a section no route uses any more), 0 otherwise.
+            if (result.Errors.Count > 0 || !result.Success) return 1;
+            if (args.Strict && result.Warnings.Count > 0)
+            {
+                Log.Error("--strict: the change left {Count} warning(s).", result.Warnings.Count);
+                return 2;
+            }
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Log.Fatal(ex, "manifest remove-route failed.");
+            return 1;
+        }
+        finally
+        {
+            await Log.CloseAndFlushAsync();
+        }
+    }
+
     /// <summary>
     /// Runs one section-registry subcommand with set-route's guard rails: layouts path
     /// resolution, the worktree guard (exit 4), JSON or human-readable output, and
@@ -444,7 +516,7 @@ public static class ManifestCommands
     /// </summary>
     private static async Task<int> RunSectionCommandAsync(
         string command,
-        SectionRunArgs args,
+        ManifestRunArgs args,
         Func<ManifestSectionRegistryService, string, Task<SectionMutationResult>> mutate)
     {
         ConfigureLogging(args.Verbose, args.Json);
@@ -721,6 +793,8 @@ public static class ManifestCommands
                     break;
             }
         }
+        // remove-route reports sections no route uses any more here.
+        foreach (string warning in result.Warnings) Log.Warning("{Warning}", warning);
     }
 
     /// <summary>
@@ -806,10 +880,10 @@ public static class ManifestCommands
     }
 
     /// <summary>
-    /// The options every section subcommand shares with set-route. One instance per command,
+    /// The options remove-route and every section subcommand share with set-route. One instance per command,
     /// because a System.CommandLine symbol belongs to the command it is added to.
     /// </summary>
-    private sealed class SectionCommandOptions
+    private sealed class ManifestCommandOptions
     {
         private readonly Option<string> _layout = new(
             aliases: ["--layout", "-l"],
@@ -826,7 +900,7 @@ public static class ManifestCommands
 
         private readonly Option<bool> _dryRun = new(["--dry-run"], "Compute the change but do not write any file.");
         private readonly Option<bool> _json = new(["--json"], "Emit a stable JSON envelope on stdout (logs go to stderr).");
-        private readonly Option<bool> _strict = new(["--strict"], "Exit with code 2 if the change left any warning (e.g. references left dangling by remove-section --force).");
+        private readonly Option<bool> _strict = new(["--strict"], "Exit with code 2 if the change left any warning (e.g. references left dangling by remove-section --force, or a section no route uses after remove-route).");
         private readonly Option<bool> _verbose = new(["--verbose", "-v"], "Enable Debug-level logging.");
 
         public void AddTo(Command command)
@@ -840,7 +914,7 @@ public static class ManifestCommands
             command.AddOption(_verbose);
         }
 
-        public SectionRunArgs Read(ParseResult parse) => new(
+        public ManifestRunArgs Read(ParseResult parse) => new(
             LayoutId: parse.GetValueForOption(_layout)!,
             LayoutsPath: parse.GetValueForOption(_layoutsPath),
             AllowCrossWorktreeSync: parse.GetValueForOption(_allowCrossWorktreeSync),
@@ -876,7 +950,7 @@ public static class ManifestCommands
         bool Strict,
         bool Verbose);
 
-    private sealed record SectionRunArgs(
+    private sealed record ManifestRunArgs(
         string LayoutId,
         string? LayoutsPath,
         bool AllowCrossWorktreeSync,

@@ -210,6 +210,154 @@ public class ManifestMutationService(
     }
 
     /// <summary>
+    /// Removes <c>routeConfigs[route]</c> from the named layout's manifest. Refuses a route
+    /// that is not there, with "did you mean" suggestions. Sections the route referenced are
+    /// left declared in <c>entities.sections</c>; each one that no remaining route references
+    /// gets a warning, so a caller can decide whether to retire it with <c>remove-section</c>.
+    /// </summary>
+    /// <remarks>
+    /// The single change's <c>Patch</c> is one RFC 6902 <c>remove</c> whose path is a JSON
+    /// Pointer from the manifest root (<c>/routeConfigs/~1events</c>), unlike set-route's
+    /// route-relative paths: the operation removes a key of <c>routeConfigs</c>, not a field
+    /// of the route, so a route-relative <c>""</c> would not say which route went.
+    /// </remarks>
+    /// <param name="layoutsPath">Absolute path to the <c>layouts/</c> directory.</param>
+    /// <param name="layoutId">The tenant layout, e.g. <c>dirt-life</c>.</param>
+    /// <param name="route">The route key to remove, e.g. <c>/messages/group-chats</c>.</param>
+    /// <param name="dryRun">If true, compute and report the change without writing it.</param>
+    /// <param name="ct">Cancellation.</param>
+    public async Task<MutationResult> RemoveRouteAsync(
+        string layoutsPath,
+        string layoutId,
+        string route,
+        bool dryRun,
+        CancellationToken ct = default)
+    {
+        string manifestPath = GetManifestPath(layoutsPath, layoutId);
+
+        if (string.IsNullOrWhiteSpace(route))
+            return RemoveRouteRefused(manifestPath, "The route must not be empty.");
+
+        SyncDocument? manifestDoc = await _fileService.ReadDocumentAsync(manifestPath, layoutsPath);
+        if (manifestDoc?.Content is not JsonObject manifest)
+            return RemoveRouteRefused(manifestPath, $"Manifest not found or unparseable at {manifestPath}.");
+
+        // Unlike set-route, never create routeConfigs: a manifest without one has no route to remove.
+        JsonObject? routeConfigs = manifest["routeConfigs"] as JsonObject;
+        if (routeConfigs is null || !routeConfigs.ContainsKey(route))
+        {
+            IReadOnlyList<string> suggestions = ManifestSectionValidator.NearestMatches(
+                route,
+                routeConfigs?.Select(entry => entry.Key) ?? [],
+                max: 3);
+            string hint = suggestions.Count > 0 ? $" Did you mean: {string.Join(", ", suggestions)}?" : string.Empty;
+            return RemoveRouteRefused(manifestPath, $"Route {route} is not in routeConfigs.{hint}");
+        }
+
+        JsonNode? removed = routeConfigs[route];
+        JsonObject? before = removed?.DeepClone() as JsonObject;
+        List<string> referencedSections = SectionReferencesIn(removed);
+
+        routeConfigs.Remove(route);
+
+        List<string> warnings = [.. referencedSections
+            .Select(section => UnusedSectionWarning(manifest, route, section))
+            .OfType<string>()];
+
+        if (!dryRun)
+        {
+            try
+            {
+                await _fileService.WriteDocumentAsync(manifestPath, manifest);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Same reporting as ApplyBatchAsync (issue #29): a result naming the file,
+                // not an exception that reaches MCP clients as a generic error.
+                return RemoveRouteRefused(manifestPath, $"Failed to write {manifestPath}: {ex.Message}");
+            }
+            _logger.LogInformation(
+                "Manifest mutation applied: removed route {Route} from {Layout} ({UnusedCount} section(s) no longer used by any route).",
+                route, layoutId, warnings.Count);
+        }
+
+        JsonArray patch =
+        [
+            new JsonObject
+            {
+                ["op"] = "remove",
+                ["path"] = $"/routeConfigs/{EscapeJsonPointer(route)}",
+            },
+        ];
+
+        return new MutationResult(
+            Success: true,
+            Changes: [new RouteChange(route, before, After: null, patch, RouteChangeStatus.Applied, Error: null)],
+            Errors: [],
+            Warnings: warnings)
+        { ManifestPath = manifestPath };
+    }
+
+    private static MutationResult RemoveRouteRefused(string manifestPath, string error)
+        => new(Success: false, Changes: [], Errors: [error], Warnings: []) { ManifestPath = manifestPath };
+
+    /// <summary>
+    /// The distinct section identifiers a route's subtree references, in document order. A
+    /// reference is judged the way <see cref="ManifestSectionRegistryService"/> judges one: a
+    /// string held by a property whose name contains "section".
+    /// </summary>
+    private static List<string> SectionReferencesIn(JsonNode? route)
+    {
+        List<string> identifiers = [];
+        CollectSectionReferences(route, owningProperty: null, identifiers);
+        return identifiers;
+    }
+
+    private static void CollectSectionReferences(JsonNode? node, string? owningProperty, List<string> identifiers)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (KeyValuePair<string, JsonNode?> property in obj)
+                    CollectSectionReferences(property.Value, property.Key, identifiers);
+                break;
+
+            case JsonArray array:
+                // Elements belong to the property that holds the array ("sectionIdentifiers").
+                foreach (JsonNode? element in array)
+                    CollectSectionReferences(element, owningProperty, identifiers);
+                break;
+
+            case JsonValue value when ManifestSectionRegistryService.IsSectionReferenceField(owningProperty)
+                                      && value.TryGetValue(out string? identifier)
+                                      && !identifiers.Contains(identifier):
+                identifiers.Add(identifier);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// A warning when no route left in <paramref name="manifest"/> references
+    /// <paramref name="section"/>, or <c>null</c> when one still does. Names any reference
+    /// outside <c>routeConfigs</c> (e.g. <c>routing.notFoundSection</c>), since the section is
+    /// then still in use and must not be removed.
+    /// </summary>
+    private static string? UnusedSectionWarning(JsonObject manifest, string route, string section)
+    {
+        List<string> references = [.. ManifestSectionRegistryService.FindMentions(manifest, section)
+            .Where(mention => mention.IsReference)
+            .Select(mention => mention.Pointer)];
+
+        if (references.Any(pointer => pointer.StartsWith("/routeConfigs/", StringComparison.Ordinal)))
+            return null;
+
+        string prefix = $"Section '{section}' was used by {route} and no remaining route references it.";
+        return references.Count > 0
+            ? $"{prefix} It is still referenced by {string.Join(", ", references)}, so keep it declared."
+            : $"{prefix} It stays declared in entities.sections; remove it with remove-section if nothing else needs it.";
+    }
+
+    /// <summary>
     /// Returns the manifest's <c>routeConfigs</c> object, creating an empty one in place
     /// if it's missing. The created entry mutates <paramref name="manifest"/>; this is
     /// intentional — the caller is mid-mutation.

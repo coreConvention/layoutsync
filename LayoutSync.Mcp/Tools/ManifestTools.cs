@@ -132,6 +132,35 @@ public sealed class ManifestTools(
         return FormatEnvelope("manifest apply-batch", layoutId, dryRun, target, result);
     }
 
+    [McpServerTool(Name = "manifest_remove_route")]
+    [Description(
+        "Remove a route entry from a layout's layout-manifest.json routeConfigs. Refuses a route that "
+        + "does not exist, with 'did you mean' suggestions. Returns the same JSON envelope shape as "
+        + "manifest_set_route: the removed route as 'before' and an RFC 6902 'remove' patch at "
+        + "/routeConfigs/<route>. Sections the route used stay declared; each one no remaining route "
+        + "references is reported in 'warnings'."
+        + LayoutsPathProvider.WriteToolNote)]
+    public async Task<string> ManifestRemoveRoute(
+        [Description("Layout id (e.g. 'dirt-life').")]
+        string layoutId,
+
+        [Description("Route key to remove, e.g. '/messages/group-chats'. Must exist in routeConfigs.")]
+        string route,
+
+        [Description("If true, compute the change but do not write the manifest file. Default: false.")]
+        bool dryRun = false,
+
+        [Description(LayoutsPathProvider.ParameterDescription)]
+        string? layoutsPath = null)
+    {
+        ResolvedLayoutsPath target = _pathProvider.Resolve(layoutsPath);
+
+        MutationResult result = await _service.RemoveRouteAsync(
+            target.LayoutsPath, layoutId, route, dryRun);
+
+        return FormatEnvelope("manifest remove-route", layoutId, dryRun, target, result);
+    }
+
     /// <summary>
     /// Serializes the shared envelope (which carries <c>manifestPath</c> from the service).
     /// A call that fell back to the server default gets a warning naming the file it

@@ -12,7 +12,7 @@ namespace LayoutSync.Mcp;
 /// Entry point for the LayoutSync MCP server. This is a thin wrapper over the file
 /// mutation services in <c>LayoutSync.Core</c> — every tool method translates an MCP
 /// invocation into a call against the same service that powers the CLI's
-/// <c>layoutsync manifest</c> subcommands (<c>set-route</c> / <c>from-json</c>,
+/// <c>layoutsync manifest</c> subcommands (<c>set-route</c> / <c>from-json</c> / <c>remove-route</c>,
 /// <c>add-section</c> / <c>rename-section</c> / <c>remove-section</c>).
 ///
 /// Transport: stdio. Logs are routed to stderr so stdout is reserved for MCP framing
