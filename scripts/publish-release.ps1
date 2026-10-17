@@ -16,7 +16,10 @@
       4. for each file that differs or is new, moves the old copy into
          release/.replaced-<yyyyMMdd-HHmmss>/, copies the new file in and checks its bytes;
       5. checks that the installed CLI reports the build's version;
-      6. on any failure, removes the copied files and moves the originals back.
+      6. on any failure or Ctrl+C, removes the copied files and moves the originals back.
+
+    A run that is killed outright cannot roll back. It leaves release/.publish-incomplete, and
+    the next run then compares every file instead of trusting --version, which repairs the mix.
 
     Running sessions keep the files they already loaded; sessions started afterwards get the new
     build. Files the build no longer produces are left in release/.
@@ -134,8 +137,19 @@ function Get-LockHolder([string] $Path) {
 function Undo-Swap($Moved, $Copied, $CreatedDirs, [string] $AsideDir) {
     $problems = [Collections.Generic.List[string]]::new()
     for ($i = $Copied.Count - 1; $i -ge 0; $i--) {
-        try { [IO.File]::Delete($Copied[$i]) }
-        catch { $problems.Add("remove the new $($Copied[$i]) ($($_.Exception.Message))") }
+        $file = $Copied[$i]
+        try { [IO.File]::Delete($file) }
+        catch {
+            # A session that started during the swap may have loaded the new file, so it cannot
+            # be deleted; it can still be moved out of the original's way.
+            try {
+                $parked = Join-Path $AsideDir 'rolled-back' ([IO.Path]::GetRelativePath($ReleaseDir, $file))
+                [void] [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($parked))
+                [IO.File]::Move($file, $parked)
+                Write-Host "  $file is in use, so it was moved to $parked."
+            }
+            catch { $problems.Add("remove the new $file ($($_.Exception.Message))") }
+        }
     }
     for ($i = $Moved.Count - 1; $i -ge 0; $i--) {
         try { [IO.File]::Move($Moved[$i].Aside, $Moved[$i].Original) }
@@ -145,20 +159,26 @@ function Undo-Swap($Moved, $Copied, $CreatedDirs, [string] $AsideDir) {
         # A folder that is not empty still holds a file listed in $problems.
         try { [IO.Directory]::Delete($dir) } catch { }
     }
-    if ($problems.Count -eq 0 -and [IO.Directory]::Exists($AsideDir)) {
-        # Only empty subfolders are left in it.
+    if ($problems.Count -eq 0 -and [IO.Directory]::Exists($AsideDir) -and
+        @(Get-ChildItem -LiteralPath $AsideDir -Recurse -File -Force).Count -eq 0) {
         try { [IO.Directory]::Delete($AsideDir, $true) }
         catch { Write-Warning "Could not delete the empty folder $AsideDir ($($_.Exception.Message))." }
     }
+    # A complete rollback restores what this run found, so the marker stays if that was already mixed.
+    if ($problems.Count -eq 0 -and -not $wasIncomplete) { [IO.File]::Delete($markerPath) }
     return $problems.ToArray()
 }
 
 # Moves each old file aside, copies the new one in and checks it, then checks the installed CLI.
-# Any failure undoes every completed step and throws.
+# A failure or Ctrl+C undoes every completed step. A killed process cannot undo anything, so the
+# marker written first stays behind and stops the next run from trusting --version.
 function Invoke-Swap($Changes, [string] $AsideDir, [string] $ExpectedVersion) {
     $moved = [Collections.Generic.List[object]]::new()
     $copied = [Collections.Generic.List[string]]::new()
     $createdDirs = [Collections.Generic.List[string]]::new()
+    $settled = $false
+    [IO.File]::WriteAllText($markerPath,
+        "pid $PID started swapping in $ExpectedVersion at $(Get-Date -Format s); the old copies are in $AsideDir")
     try {
         foreach ($change in $Changes) {
             if (-not $change.IsNew) {
@@ -183,17 +203,29 @@ function Invoke-Swap($Changes, [string] $AsideDir, [string] $ExpectedVersion) {
         if ($reported -ne $ExpectedVersion) {
             throw "after the swap, $cliExe --version reports '$reported' instead of '$ExpectedVersion'"
         }
+        $settled = $true
     }
     catch {
+        $settled = $true
         $cause = $_.Exception.Message
         Write-Host "Swap failed: $cause. Rolling back $($copied.Count) copied and $($moved.Count) moved file(s)."
         $problems = @(Undo-Swap $moved $copied $createdDirs $AsideDir)
         if ($problems.Count -eq 0) {
-            throw "the swap failed and was rolled back, so $ReleaseDir is unchanged. Cause: $cause"
+            throw "the swap failed and was rolled back, so $ReleaseDir is as this run found it. Cause: $cause"
         }
         throw ("the swap failed and the rollback is INCOMPLETE, so $ReleaseDir may mix old and new files. " +
             "Cause: $cause. Still to do by hand:`n  " + ($problems -join "`n  "))
     }
+    finally {
+        # Ctrl+C stops the script without running catch blocks, but finally blocks still run.
+        if (-not $settled) {
+            Write-Host "Interrupted. Rolling back $($copied.Count) copied and $($moved.Count) moved file(s)."
+            $problems = @(Undo-Swap $moved $copied $createdDirs $AsideDir)
+            if ($problems.Count -eq 0) { Write-Host "Rolled back, so $ReleaseDir is as this run found it." }
+            else { Write-Host ("The rollback is INCOMPLETE. Still to do by hand:`n  " + ($problems -join "`n  ")) }
+        }
+    }
+    [IO.File]::Delete($markerPath)
 }
 
 # Trying to delete each file is the test of whether a running process still uses it: a process
@@ -254,9 +286,18 @@ try {
     if (-not $builtVersion) { throw "the staged $cliExe does not report a version, so the build is unusable" }
     $installedVersion = Get-ReportedVersion $ReleaseDir
 
+    # Left by a run that was killed mid-swap: the CLI may already report the new build while the
+    # MCP server files are still old, so --version proves nothing until every file is compared.
+    $markerPath = Join-Path $ReleaseDir '.publish-incomplete'
+    $wasIncomplete = [IO.File]::Exists($markerPath)
+    if ($wasIncomplete) {
+        Write-Warning ("An earlier publish stopped partway through its swap ($(Get-Content -Raw -LiteralPath $markerPath)). " +
+            'Comparing every file instead of trusting --version.')
+    }
+
     # Byte comparison cannot spot a second build of the same commit: every DLL records the folder
     # it was built in. The version string carries the commit hash, so it can.
-    if ($installedVersion -eq $builtVersion -and -not $Force) {
+    if ($installedVersion -eq $builtVersion -and -not $Force -and -not $wasIncomplete) {
         Write-Host "$ReleaseDir already reports $builtVersion, the same version and commit as this build. Nothing to swap (pass -Force to swap anyway)."
     }
     else {
@@ -272,6 +313,7 @@ try {
 
         if ($changes.Count -eq 0) {
             Write-Host "$ReleaseDir already matches this build byte for byte. Nothing to swap."
+            if ($wasIncomplete -and -not $dryRun) { [IO.File]::Delete($markerPath) }   # whole again
         }
         else {
             Write-Host "$($changes.Count) file(s) differ from $ReleaseDir ($(if ($installedVersion) { $installedVersion } else { 'no installed version' }) -> $builtVersion):"
