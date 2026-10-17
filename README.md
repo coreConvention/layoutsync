@@ -24,14 +24,21 @@ Requires the .NET 10 SDK.
 dotnet test LayoutSync.sln
 ```
 
-For local use, publish both programs into `release/` (gitignored) and put that directory on your `PATH`:
+For local use, publish both programs into `release/` (gitignored) and put that directory on your `PATH`. Use the publish script (PowerShell 7.4 or later):
 
 ```bash
-dotnet publish LayoutSync/LayoutSync.csproj -c Release -o release --self-contained false
-dotnet publish LayoutSync.Mcp/LayoutSync.Mcp.csproj -c Release -o release --self-contained false
+pwsh scripts/publish-release.ps1
 ```
 
-`dotnet publish` does not create the short command names, so add two one-line wrappers to `release/` once. On Windows: `layoutsync.cmd` containing `@"%~dp0LayoutSync.exe" %*`, and `layoutsync-mcp.cmd` containing `@"%~dp0LayoutSync.Mcp.exe" %*`. On macOS or Linux, use symlinks or equivalent shell scripts. The `.mcp.json` example below runs the server by the name `layoutsync-mcp`. A running MCP server keeps using the binary it started with, so restart your MCP client after republishing.
+Do not run `dotnet publish -o release` directly. Every session that started `layoutsync-mcp` keeps its files open, and Windows refuses to overwrite a file in use, so a direct publish fails partway and can leave `release/` with a mix of old and new files. The script builds both programs into a temporary folder and replaces only the files that changed: it moves each old copy into `release/.replaced-<timestamp>/` (Windows allows moving a file in use), copies the new one in, and undoes everything if any step fails. It always publishes into the main checkout's `release/`, also when run from a worktree.
+
+- `-WhatIf` builds and lists the files that would change, without touching `release/`.
+- `-Version 1.2.5` stamps a version for a build of a release tag, so `layoutsync --version` reads `1.2.5+<commit>`. Without it the version is `1.0.0+<commit>`.
+- Only one publish runs at a time: a second run is refused while `release/.publish.lock` is held.
+- A run changes nothing when `release/` already reports the same version and commit. `-Force` swaps anyway, for example to install uncommitted changes.
+- `.replaced-*` folders can be deleted once the sessions that loaded the old files have exited. Each run deletes the ones no running session still uses.
+
+The script does not create the short command names, so add two one-line wrappers to `release/` once. On Windows: `layoutsync.cmd` containing `@"%~dp0LayoutSync.exe" %*`, and `layoutsync-mcp.cmd` containing `@"%~dp0LayoutSync.Mcp.exe" %*`. On macOS or Linux, use symlinks or equivalent shell scripts. The `.mcp.json` example below runs the server by the name `layoutsync-mcp`. A running MCP server keeps using the binary it started with, so restart your MCP client after republishing.
 
 Pushing a `v*` tag publishes a framework-dependent CLI tarball as a GitHub Release, for CI consumers (see `.github/workflows/release.yml`).
 
