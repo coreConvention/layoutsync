@@ -559,9 +559,11 @@ public class ManifestSectionRegistryServiceTests : IDisposable
         WriteStandardLayout();
         string sectionPath = SectionPath("sections/full-width-layout.json");
         byte[] originalSection = File.ReadAllBytes(sectionPath);
-        // Every raw write fails: the section file, then the manifest restore.
+        // Every raw write after the manifest's own fails: the section file, then the manifest
+        // restore. (The manifest write is a raw write too since #70.)
+        int manifestWrites = 0;
         ManifestSectionRegistryService service = ServiceWith(new FaultyFileService(
-            writeFault: _ => new IOException("disk full")));
+            writeFault: path => path == ManifestPath() && ++manifestWrites == 1 ? null : new IOException("disk full")));
 
         SectionMutationResult result = await service.RenameSectionAsync(
             _layoutsPath, LayoutId, "full-width-layout", "test-full-width-layout",

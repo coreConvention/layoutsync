@@ -179,7 +179,7 @@ public class ManifestMutationService(
         {
             try
             {
-                await _fileService.WriteDocumentAsync(manifestPath, manifest);
+                await _fileService.WriteManifestAsync(manifestPath, manifest);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -268,7 +268,7 @@ public class ManifestMutationService(
         {
             try
             {
-                await _fileService.WriteDocumentAsync(manifestPath, manifest);
+                await _fileService.WriteManifestAsync(manifestPath, manifest);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {

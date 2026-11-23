@@ -156,6 +156,31 @@ public class LocalFileService(ILogger<LocalFileService> logger)
     }
 
     /// <summary>
+    /// Changes an existing file to hold <paramref name="content"/>, rewriting only the values
+    /// that differ from what the file holds now and keeping every other byte, so a block the
+    /// author wrote compactly stays compact (issue #70; see
+    /// <see cref="FormatPreservingJsonWriter"/>). Used for the layout manifest, which only the
+    /// manifest tools write; synced documents still go through <see cref="WriteDocumentAsync"/>.
+    /// </summary>
+    /// <exception cref="IOException">
+    /// The file could not be read or written, or the change could not be made without altering
+    /// anything else (the result would not parse to <paramref name="content"/>). In that case
+    /// nothing is written.
+    /// </exception>
+    public async Task WriteManifestAsync(string filePath, JsonObject content, CancellationToken ct = default)
+    {
+        byte[] original = await ReadAllBytesAsync(filePath, ct);
+        byte[] updated = FormatPreservingJsonWriter.Rewrite(original, content)
+            ?? throw new IOException(
+                "the change could not be made without reformatting the rest of the file "
+                + "(it may have changed on disk since it was read). Nothing was written.");
+
+        if (!updated.AsSpan().SequenceEqual(original))
+            await WriteAllBytesAsync(filePath, updated, ct);
+        _logger.LogDebug("Wrote file: {Path}", filePath);
+    }
+
+    /// <summary>
     /// Reads a file's raw bytes, for byte-exact edits where a parse/serialize round-trip
     /// would reformat the file (see <see cref="ManifestSectionRegistryService"/>). Virtual so
     /// tests can simulate I/O failures deterministically; file permissions cannot, because
