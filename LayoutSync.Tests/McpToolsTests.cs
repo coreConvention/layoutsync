@@ -577,6 +577,29 @@ public class McpToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task ManifestUpdateSection_RefusesAManifestThatRepeatsAProperty_InTheEnvelope()
+    {
+        // Issue #71: an escaping exception reaches MCP clients only as "An error occurred";
+        // a repeated property must come back as a refused envelope naming the manifest.
+        string manifestPath = ManifestPathIn(_layoutsPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
+        File.WriteAllText(manifestPath, """
+            { "identifier": "test-layout",
+              "entities": { "sections": [ { "identifier": "home", "description": "a", "description": "b" } ] } }
+            """);
+        ManifestSectionTools tools = new(_registryService, _pathProvider);
+
+        string output = await tools.ManifestUpdateSection(
+            LayoutId, "home", description: "c", dryRun: false, layoutsPath: _layoutsPath);
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+
+        Assert.False(envelope["success"]?.GetValue<bool>());
+        Assert.Contains(
+            $"Manifest not found or unparseable at {manifestPath}",
+            Assert.Single(envelope["errors"]!.AsArray())!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task ManifestRenameSection_ReportsEveryRewrittenReference()
     {
         WriteFixture();

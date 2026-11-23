@@ -500,6 +500,38 @@ public class ManifestSectionRegistryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task AllOperations_RefuseAManifestThatRepeatsAProperty()
+    {
+        // Issue #71: the repeat used to parse, then crash the first lookup into that object
+        // with an unhandled ArgumentException, which MCP clients see only as "An error occurred".
+        const string manifest = """
+            {
+              "identifier": "test-layout",
+              "entities": {
+                "sections": [
+                  { "identifier": "home", "type": "ui-schema-section", "description": "a", "description": "b" }
+                ]
+              }
+            }
+            """;
+        WriteManifest(manifest);
+
+        SectionMutationResult added = await _service.AddSectionAsync(
+            _layoutsPath, LayoutId, new SectionEntryInput("hero"), dryRun: false);
+        SectionMutationResult updated = await _service.UpdateSectionAsync(
+            _layoutsPath, LayoutId, new SectionEntryInput("home", Description: "c"), dryRun: false);
+        SectionMutationResult renamed = await _service.RenameSectionAsync(
+            _layoutsPath, LayoutId, "home", "landing", updateSectionFile: false, dryRun: false);
+        SectionMutationResult removed = await _service.RemoveSectionAsync(
+            _layoutsPath, LayoutId, "home", force: true, dryRun: false);
+
+        Assert.All(
+            [added, updated, renamed, removed],
+            result => Assert.Contains("not found or unparseable", Assert.Single(result.Errors)));
+        Assert.Equal(manifest, File.ReadAllText(ManifestPath()));
+    }
+
+    [Fact]
     public async Task RenameSection_RestoresManifestWhenSectionFileWriteFails()
     {
         WriteStandardLayout();

@@ -113,6 +113,19 @@ public class LocalFileServiceWriteTests : IDisposable
         Assert.Equal("a" + replacement + "b", JsonNode.Parse(File.ReadAllText(_manifestPath))?["v"]?.GetValue<string>());
     }
 
+    [Theory]
+    [InlineData("""{ "identifier": "demo", "identifier": "other" }""")]
+    [InlineData("""{ "identifier": "demo", "entities": { "sections": [ { "type": "a", "type": "b" } ] } }""")]
+    public async Task ReadDocumentAsync_RefusesAFileThatRepeatsAProperty_AtAnyDepth(string json)
+    {
+        // Issue #71: which value a repeat means is undefined, and System.Text.Json kept both
+        // until the first lookup into that object threw. The sync shares this reader, so a
+        // repeat anywhere now fails the file as a read failure instead of syncing it as-is.
+        File.WriteAllText(_manifestPath, json);
+
+        Assert.Null(await _fileService.ReadDocumentAsync(_manifestPath, _layoutsPath));
+    }
+
     private async Task ReadAndRewriteAsync()
     {
         SyncDocument? doc = await _fileService.ReadDocumentAsync(_manifestPath, _layoutsPath);
