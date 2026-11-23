@@ -95,15 +95,17 @@ The sync reports this as a `Pinned id mismatch` warning that names the file, the
 
 ### Section registry
 
-`entities.sections` lists the sections a layout declares, and `set-route` accepts only identifiers declared there. Three subcommands change the list. They take the same options as `set-route` (`--layout`, `--layouts-path`, `--dry-run`, `--json`, `--strict`, `--allow-cross-worktree-sync`):
+`entities.sections` lists the sections a layout declares, and `set-route` accepts only identifiers declared there. Four subcommands change the list. They take the same options as `set-route` (`--layout`, `--layouts-path`, `--dry-run`, `--json`, `--strict`, `--allow-cross-worktree-sync`):
 
 ```bash
 layoutsync manifest add-section events-page-header --layout dirt-life --description "Events header"
+layoutsync manifest update-section events-page-header --layout dirt-life --description "Events header with filters" --dry-run
 layoutsync manifest rename-section full-width-layout cream-pi-full-width-layout --layout cream-pi --dry-run
 layoutsync manifest remove-section old-hero --layout dirt-life
 ```
 
 - **`add-section`** appends an entry. `--type` defaults to `ui-schema-section`, and `--file` defaults to `sections/<identifier>.json`, relative to the layout directory. It refuses an identifier that is already declared. It warns, but still adds the entry, when the section file is missing or declares a different `identifier`.
+- **`update-section`** changes an existing entry's `--description`, `--file` and/or `--type` (give at least one). The entry keeps its position and every other key. Only the changed values are rewritten in the file (a key the entry lacked is added after its last key, in the entry's own spacing), so the rest of the manifest keeps its formatting, compact one-line blocks included. It refuses an undeclared identifier, and warns when a new `--file` is missing or declares a different `identifier`. If the file changed on disk while the update ran, it refuses rather than write.
 - **`rename-section`** changes three things in one step:
   - the entry's `identifier`;
   - every field in the manifest that references the section, all in a single write;
@@ -163,6 +165,7 @@ Register the server in your MCP client. For Claude Code, add it to the project's
 | `manifest_remove_route` | writes | Remove one route (same as `remove-route`). Refuses a route that does not exist, and warns about each section no remaining route uses. Supports `dryRun`. |
 | `manifest_apply_batch` | writes | Apply several route patches, either all-or-nothing (`onError: "abort"`) or skipping invalid ones (`onError: "skip"`). Supports `dryRun`. |
 | `manifest_add_section` | writes | Declare a section in `entities.sections` (same as `add-section`). Supports `dryRun`. |
+| `manifest_update_section` | writes | Change a declared section's `description`, `file` and/or `type` in place, keeping its position and the rest of the manifest's formatting (same as `update-section`). Supports `dryRun`. |
 | `manifest_rename_section` | writes | Rename a section everywhere in the manifest, and in its section file unless `manifestOnly: true` (same as `rename-section`). Supports `dryRun`. |
 | `manifest_remove_section` | writes | Remove a section. Refuses while it is referenced, unless `force: true` (same as `remove-section`). Supports `dryRun`. |
 

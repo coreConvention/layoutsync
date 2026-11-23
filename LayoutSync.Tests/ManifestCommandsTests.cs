@@ -119,6 +119,44 @@ public class ManifestCommandsTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateSection_MapsEveryOptionAndKeepsTheEntryInPlace()
+    {
+        int exitCode = await RunAsync(
+            "update-section", "hero",
+            "--description", "Landing hero",
+            "--file", "sections/hero.json",
+            "--type", "custom-type");
+
+        Assert.Equal(0, exitCode);
+        JsonObject entry = Assert.Single(ReadManifest()["entities"]!["sections"]!.AsArray())!.AsObject();
+        Assert.Equal("hero", entry["identifier"]?.GetValue<string>());
+        Assert.Equal("Landing hero", entry["description"]?.GetValue<string>());
+        Assert.Equal("custom-type", entry["type"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task UpdateSection_ExitsOneAndWritesNothingForAnUndeclaredSection()
+    {
+        string manifestBefore = File.ReadAllText(_manifestPath);
+
+        int exitCode = await RunAsync("update-section", "nope", "--description", "x");
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(manifestBefore, File.ReadAllText(_manifestPath));
+    }
+
+    [Fact]
+    public async Task UpdateSection_DryRun_WritesNothing()
+    {
+        string manifestBefore = File.ReadAllText(_manifestPath);
+
+        int exitCode = await RunAsync("update-section", "hero", "--description", "x", "--dry-run");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(manifestBefore, File.ReadAllText(_manifestPath));
+    }
+
+    [Fact]
     public async Task AddSection_ExitsOneForADuplicate()
     {
         int exitCode = await RunAsync("add-section", "hero");

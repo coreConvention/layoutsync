@@ -124,7 +124,7 @@ public sealed class ManifestReadTools(
     [Description(
         "List every section declared under entities.sections in a layout's manifest. "
         + "Use this to discover the valid section identifiers for manifest_set_route / "
-        + "manifest_apply_batch / manifest_rename_section / manifest_remove_section — picking "
+        + "manifest_apply_batch / manifest_update_section / manifest_rename_section / manifest_remove_section — picking "
         + "from this list guarantees no validation typo."
         + LayoutsPathProvider.ReadToolNote)]
     public async Task<string> ManifestListSections(

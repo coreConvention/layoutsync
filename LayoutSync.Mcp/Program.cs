@@ -13,7 +13,7 @@ namespace LayoutSync.Mcp;
 /// mutation services in <c>LayoutSync.Core</c> — every tool method translates an MCP
 /// invocation into a call against the same service that powers the CLI's
 /// <c>layoutsync manifest</c> subcommands (<c>set-route</c> / <c>from-json</c> / <c>remove-route</c>,
-/// <c>add-section</c> / <c>rename-section</c> / <c>remove-section</c>).
+/// <c>add-section</c> / <c>update-section</c> / <c>rename-section</c> / <c>remove-section</c>).
 ///
 /// Transport: stdio. Logs are routed to stderr so stdout is reserved for MCP framing
 /// (any byte on stdout that isn't a JSON-RPC frame would corrupt the protocol).
