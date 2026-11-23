@@ -85,6 +85,10 @@ Guards: it needs `--clean`, `--layout` and `--sync-once` (exit `1` otherwise, so
 
 `remove-route <route>` deletes one entry from `routeConfigs`. It takes the same options as `set-route` (`--layout`, `--layouts-path`, `--dry-run`, `--json`, `--strict`, `--allow-cross-worktree-sync`). It refuses a route that is not there and suggests the closest route keys. The sections the route used stay declared in `entities.sections`. Each one that no remaining route references is reported as a warning: if nothing else in the manifest names it, you can retire it with `remove-section`, and if another field still names it (for example `routing.notFoundSection`), the warning lists that field. With `--strict`, any such warning makes the exit code `2`, though the route is still removed.
 
+### Manifest formatting
+
+Every `manifest` subcommand rewrites only the values it changes; every other byte of `layout-manifest.json` stays as it was, so a block written on one line (for example a `themes.set` array of one-line objects) stays on one line. New values are written like their surroundings: on one line inside a one-line block or after a one-line sibling, otherwise expanded at the indentation around them. A UTF-8 BOM and the line ending (CRLF or LF) are kept. If the result would not read back as exactly the intended manifest, nothing is written and the command fails.
+
 ### Pinned ids
 
 A file can pin its document's id by declaring `@metadata.@id`, so that other documents can reference it by a fixed id. With `--preserve-ids`, a document is created under its pinned id; without the flag, or without a pin, it gets a generated one.
