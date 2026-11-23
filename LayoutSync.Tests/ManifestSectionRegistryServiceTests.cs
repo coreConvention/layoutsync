@@ -789,6 +789,28 @@ public class ManifestSectionRegistryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task RemoveSection_RefusesWhenTheManifestChangedOnDiskAfterItWasRead()
+    {
+        // Another writer changes the manifest between the parse and the write (issue #74):
+        // writing anyway would undo that edit, so nothing is written.
+        WriteStandardLayout();
+        string original = File.ReadAllText(ManifestPath());
+        bool written = false;
+        ManifestSectionRegistryService service = ServiceWith(new ChangedOnDiskFileService(
+            ManifestPath(),
+            Encoding.UTF8.GetBytes(original.Replace("\"Sidebar summary\"", "\"Edited elsewhere\"")),
+            onWrite: () => written = true));
+
+        SectionMutationResult result = await service.RemoveSectionAsync(
+            _layoutsPath, LayoutId, "unused-section", force: false, dryRun: false);
+
+        Assert.False(result.Success);
+        Assert.Contains("it may have changed on disk since it was read", Assert.Single(result.Errors));
+        Assert.False(written);
+        Assert.Equal(original, File.ReadAllText(ManifestPath()));
+    }
+
+    [Fact]
     public void SpliceRegistryEntry_KeepsTheBomAndWritesCharactersLiterally()
     {
         byte[] json = [0xEF, 0xBB, 0xBF, .. """{"entities":{"sections":[{"identifier":"a","description":"full\/width"}]}}"""u8];

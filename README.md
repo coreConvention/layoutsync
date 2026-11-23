@@ -87,7 +87,7 @@ Guards: it needs `--clean`, `--layout` and `--sync-once` (exit `1` otherwise, so
 
 ### Manifest formatting
 
-Every `manifest` subcommand rewrites only the values it changes; every other byte of `layout-manifest.json` stays as it was, so a block written on one line (for example a `themes.set` array of one-line objects) stays on one line. New values are written like their surroundings: on one line inside a one-line block or after a one-line sibling, otherwise expanded at the indentation around them. A UTF-8 BOM and the line ending (CRLF or LF) are kept. If the result would not read back as exactly the intended manifest, nothing is written and the command fails.
+Every `manifest` subcommand rewrites only the values it changes; every other byte of `layout-manifest.json` stays as it was, so a block written on one line (for example a `themes.set` array of one-line objects) stays on one line. New values are written like their surroundings: on one line inside a one-line block or after a one-line sibling, otherwise expanded at the indentation around them. A UTF-8 BOM and the line ending (CRLF or LF) are kept. If the result would not read back as exactly the intended manifest, nothing is written and the command fails. It also fails, writing nothing, when the file changed on disk after the command read it (another session's manifest command, an editor save), so that change is never silently undone; run the command again.
 
 ### Pinned ids
 

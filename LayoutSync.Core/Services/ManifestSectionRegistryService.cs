@@ -87,6 +87,9 @@ public class ManifestSectionRegistryService(
         if (await LoadManifestAsync(manifestPath, layoutsPath) is not { } manifest)
             return Refused(manifestPath, identifier, null, ManifestNotFoundMessage(manifestPath));
 
+        // Kept unchanged so the write can refuse if the file changed after this read (#74).
+        JsonObject asRead = manifest.DeepClone().AsObject();
+
         if (RegistryShapeError(manifest) is { } shapeError)
             return Refused(manifestPath, identifier, null, shapeError);
 
@@ -117,7 +120,7 @@ public class ManifestSectionRegistryService(
 
         if (!dryRun)
         {
-            if (await TryWriteManifestAsync(manifestPath, manifest) is { } writeError)
+            if (await TryWriteManifestAsync(manifestPath, manifest, asRead) is { } writeError)
                 return Refused(manifestPath, identifier, null, writeError, references: references);
             _logger.LogInformation("Section registry: added '{Identifier}' to {Layout}.", identifier, layoutId);
         }
@@ -174,6 +177,9 @@ public class ManifestSectionRegistryService(
 
         if (await LoadManifestAsync(manifestPath, layoutsPath) is not { } manifest)
             return Refused(manifestPath, identifier, newIdentifier, ManifestNotFoundMessage(manifestPath));
+
+        // Kept unchanged so the write can refuse if the file changed after this read (#74).
+        JsonObject asRead = manifest.DeepClone().AsObject();
 
         if (RegistryShapeError(manifest) is { } shapeError)
             return Refused(manifestPath, identifier, newIdentifier, shapeError);
@@ -249,13 +255,13 @@ public class ManifestSectionRegistryService(
         {
             if (sectionFileUpdate is null)
             {
-                if (await TryWriteManifestAsync(manifestPath, manifest) is { } writeError)
+                if (await TryWriteManifestAsync(manifestPath, manifest, asRead) is { } writeError)
                     return Refused(manifestPath, identifier, newIdentifier, writeError, before, references);
             }
             else
             {
                 (string? writeError, bool manifestLeftChanged) = await WriteManifestThenSectionFileAsync(
-                    manifestPath, manifest, sectionFile.Path!, sectionFileUpdate, identifier, newIdentifier, ct);
+                    manifestPath, manifest, asRead, sectionFile.Path!, sectionFileUpdate, identifier, newIdentifier, ct);
 
                 if (writeError is not null && !manifestLeftChanged)
                     return Refused(manifestPath, identifier, newIdentifier, writeError, before, references);
@@ -324,6 +330,9 @@ public class ManifestSectionRegistryService(
         if (await LoadManifestAsync(manifestPath, layoutsPath) is not { } manifest)
             return Refused(manifestPath, identifier, null, ManifestNotFoundMessage(manifestPath));
 
+        // Kept unchanged so the write can refuse if the file changed after this read (#74).
+        JsonObject asRead = manifest.DeepClone().AsObject();
+
         if (RegistryShapeError(manifest) is { } shapeError)
             return Refused(manifestPath, identifier, null, shapeError);
 
@@ -354,7 +363,7 @@ public class ManifestSectionRegistryService(
 
         if (!dryRun)
         {
-            if (await TryWriteManifestAsync(manifestPath, manifest) is { } writeError)
+            if (await TryWriteManifestAsync(manifestPath, manifest, asRead) is { } writeError)
                 return Refused(manifestPath, identifier, null, writeError, before, references);
             _logger.LogInformation(
                 "Section registry: removed '{Identifier}' from {Layout} ({DanglingCount} reference(s) left dangling).",
@@ -897,6 +906,7 @@ public class ManifestSectionRegistryService(
     private async Task<(string? Error, bool ManifestLeftChanged)> WriteManifestThenSectionFileAsync(
         string manifestPath,
         JsonObject manifest,
+        JsonObject asRead,
         string sectionFilePath,
         byte[] sectionFileContent,
         string identifier,
@@ -915,7 +925,7 @@ public class ManifestSectionRegistryService(
         }
 
         // Nothing else has been written yet, so a failure here is a plain refusal.
-        if (await TryWriteManifestAsync(manifestPath, manifest) is { } manifestWriteError)
+        if (await TryWriteManifestAsync(manifestPath, manifest, asRead) is { } manifestWriteError)
             return (manifestWriteError, false);
 
         try
@@ -1041,11 +1051,11 @@ public class ManifestSectionRegistryService(
     /// same words as <see cref="ManifestMutationService"/> (issue #29): an escaping exception
     /// reaches MCP clients only as a generic "An error occurred" message.
     /// </summary>
-    private async Task<string?> TryWriteManifestAsync(string manifestPath, JsonObject manifest)
+    private async Task<string?> TryWriteManifestAsync(string manifestPath, JsonObject manifest, JsonObject asRead)
     {
         try
         {
-            await _fileService.WriteManifestAsync(manifestPath, manifest);
+            await _fileService.WriteManifestAsync(manifestPath, manifest, asRead);
             return null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

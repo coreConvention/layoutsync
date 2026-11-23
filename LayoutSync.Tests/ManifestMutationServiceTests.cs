@@ -407,6 +407,30 @@ public class ManifestMutationServiceTests : IDisposable
             """), File.ReadAllText(ManifestPath()));
     }
 
+    [Fact]
+    public async Task ApplyBatchAsync_RefusesWhenTheManifestChangedOnDiskAfterItWasRead()
+    {
+        // Another writer saves the manifest between this operation's read and its write
+        // (issue #74). Writing anyway would put the old document back and undo that edit.
+        WriteFixture(StandardFixture);
+        string manifestPath = ManifestPath();
+        string editedElsewhere = StandardFixture.Replace("\"/events\"", "\"/events-renamed\"");
+        bool written = false;
+        ManifestMutationService service = ServiceWith(new EditBeforeWriteFileService(
+            manifestPath, editedElsewhere, onWrite: () => written = true));
+
+        MutationResult result = await service.ApplyBatchAsync(
+            _layoutsPath, LayoutId,
+            [new(Route: "/events", StructuralSection: "full-width-layout")],
+            BatchErrorMode.Abort, dryRun: false);
+
+        Assert.False(result.Success);
+        Assert.Contains("it may have changed on disk since it was read", Assert.Single(result.Errors));
+        Assert.Empty(result.Changes);
+        Assert.False(written);
+        Assert.Equal(editedElsewhere, File.ReadAllText(manifestPath));
+    }
+
     // ───── remove-route (issue #64) ─────
 
     [Fact]
@@ -564,6 +588,34 @@ public class ManifestMutationServiceTests : IDisposable
 
     private string ManifestPath()
         => Path.Combine(_layoutsPath, LayoutId, "manifests", "layout-manifest.json");
+
+    private static ManifestMutationService ServiceWith(LocalFileService fileService)
+        => new(
+            fileService,
+            new ManifestSectionValidator(NullLogger<ManifestSectionValidator>.Instance),
+            NullLogger<ManifestMutationService>.Instance);
+
+    /// <summary>
+    /// Saves <paramref name="editedContent"/> to <paramref name="path"/> just before the
+    /// write's raw read of it, as another writer would between this operation's parse and
+    /// its write, and records any raw write.
+    /// </summary>
+    private sealed class EditBeforeWriteFileService(string path, string editedContent, Action onWrite)
+        : LocalFileService(NullLogger<LocalFileService>.Instance)
+    {
+        public override Task<byte[]> ReadAllBytesAsync(string filePath, CancellationToken ct = default)
+        {
+            if (filePath == path)
+                File.WriteAllText(filePath, editedContent);
+            return base.ReadAllBytesAsync(filePath, ct);
+        }
+
+        public override Task WriteAllBytesAsync(string filePath, byte[] content, CancellationToken ct = default)
+        {
+            onWrite();
+            return base.WriteAllBytesAsync(filePath, content, ct);
+        }
+    }
 
     private void WriteFixture(string content)
     {
