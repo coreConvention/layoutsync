@@ -16,7 +16,7 @@ namespace LayoutSync;
 
 /// <summary>
 /// CLI surface for <c>layoutsync manifest set-route</c> / <c>from-json</c> / <c>remove-route</c>
-/// (route configurations) and <c>add-section</c> / <c>rename-section</c> / <c>remove-section</c>
+/// (route configurations) and <c>add-section</c> / <c>update-section</c> / <c>rename-section</c> / <c>remove-section</c>
 /// (the <c>entities.sections</c> registry). Lives in the exe project (not
 /// <c>LayoutSync.Core</c>) because System.CommandLine is an exe-only concern.
 ///
@@ -49,6 +49,7 @@ public static class ManifestCommands
         parent.AddCommand(BuildFromJsonCommand());
         parent.AddCommand(BuildRemoveRouteCommand());
         parent.AddCommand(BuildAddSectionCommand());
+        parent.AddCommand(BuildUpdateSectionCommand());
         parent.AddCommand(BuildRenameSectionCommand());
         parent.AddCommand(BuildRemoveSectionCommand());
         return parent;
@@ -230,7 +231,7 @@ public static class ManifestCommands
         return cmd;
     }
 
-    // ───── add-section / rename-section / remove-section ─────
+    // ───── add-section / update-section / rename-section / remove-section ─────
 
     private static Command BuildAddSectionCommand()
     {
@@ -272,6 +273,53 @@ public static class ManifestCommands
                 "manifest add-section",
                 args,
                 (service, layoutsPath) => service.AddSectionAsync(layoutsPath, args.LayoutId, entry, args.DryRun));
+        });
+
+        return cmd;
+    }
+
+    private static Command BuildUpdateSectionCommand()
+    {
+        Argument<string> identifierArg = new(
+            name: "identifier",
+            description: "The declared section whose entities.sections entry to change.");
+
+        Option<string?> descriptionOpt = new(
+            aliases: ["--description"],
+            description: "New description for the registry entry.");
+
+        Option<string?> fileOpt = new(
+            aliases: ["--file"],
+            description: "New section file, relative to the layout directory.");
+
+        Option<string?> typeOpt = new(
+            aliases: ["--type"],
+            description: "New section type.");
+
+        ManifestCommandOptions common = new();
+        Command cmd = new(
+            "update-section",
+            "Change an entities.sections entry's description, file or type in place. The entry keeps its position and every key not named; only the changed values' bytes are rewritten, so the rest of the manifest keeps its formatting. Refuses an undeclared identifier and a call that names no field.");
+        cmd.AddArgument(identifierArg);
+        cmd.AddOption(descriptionOpt);
+        cmd.AddOption(fileOpt);
+        cmd.AddOption(typeOpt);
+        common.AddTo(cmd);
+
+        cmd.SetHandler(async (InvocationContext context) =>
+        {
+            ParseResult parse = context.ParseResult;
+            ManifestRunArgs args = common.Read(parse);
+            SectionEntryInput changes = new(
+                Identifier: parse.GetValueForArgument(identifierArg),
+                Type: parse.GetValueForOption(typeOpt),
+                File: parse.GetValueForOption(fileOpt),
+                Description: parse.GetValueForOption(descriptionOpt));
+
+            context.ExitCode = await RunSectionCommandAsync(
+                "manifest update-section",
+                args,
+                (service, layoutsPath) => service.UpdateSectionAsync(layoutsPath, args.LayoutId, changes, args.DryRun));
         });
 
         return cmd;

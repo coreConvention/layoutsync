@@ -6,11 +6,11 @@ using Microsoft.Extensions.Logging;
 namespace LayoutSync.Services;
 
 /// <summary>
-/// Adds, renames and removes entries in a layout manifest's <c>entities.sections</c> registry:
+/// Adds, updates, renames and removes entries in a layout manifest's <c>entities.sections</c> registry:
 /// the declared set of section identifiers that <see cref="ManifestSectionValidator"/> checks
 /// every route patch against. Companion to <see cref="ManifestMutationService"/>, which owns
-/// route-level changes. The CLI (<c>manifest add-section</c> / <c>rename-section</c> /
-/// <c>remove-section</c>) and the MCP section tools both call this service, so the two
+/// route-level changes. The CLI (<c>manifest add-section</c> / <c>update-section</c> /
+/// <c>rename-section</c> / <c>remove-section</c>) and the MCP section tools both call this service, so the two
 /// surfaces apply identical validation.
 ///
 /// What counts as a reference: section identifiers are named from more places than
@@ -373,6 +373,289 @@ public class ManifestSectionRegistryService(
             FilesChanged: [manifestPath],
             Errors: [],
             Warnings: warnings);
+    }
+
+    /// <summary>
+    /// Changes an existing <c>entities.sections</c> entry's <c>description</c>, <c>file</c>
+    /// and/or <c>type</c> in place (issue #69). The entry keeps its position, its identifier and
+    /// every key not named. Refuses an identifier that is not declared exactly once, a call that
+    /// names no field, and a <c>file</c> outside the layout directory. Warns (without refusing)
+    /// when a new <c>file</c> is missing or declares another identifier, as add does.
+    ///
+    /// Unlike the other registry writes, the manifest is not re-serialized: only the bytes of the
+    /// changed values (and, for a key the entry did not have, one inserted property copying the
+    /// entry's own spacing) are spliced into the file, so compact blocks elsewhere keep their
+    /// formatting. The spliced bytes are parsed back and compared with the intended manifest;
+    /// a mismatch refuses the update instead of writing something else.
+    /// </summary>
+    /// <param name="layoutsPath">Absolute path to the <c>layouts/</c> directory.</param>
+    /// <param name="layoutId">The tenant layout, e.g. <c>dirt-life</c>.</param>
+    /// <param name="changes">
+    /// The entry to change (<see cref="SectionEntryInput.Identifier"/>) and its new values; a
+    /// null or blank field is left as it is.
+    /// </param>
+    /// <param name="dryRun">If true, compute and report the change without writing it.</param>
+    /// <param name="ct">Cancellation.</param>
+    public async Task<SectionMutationResult> UpdateSectionAsync(
+        string layoutsPath,
+        string layoutId,
+        SectionEntryInput changes,
+        bool dryRun,
+        CancellationToken ct = default)
+    {
+        string manifestPath = ManifestPath(layoutsPath, layoutId);
+        string identifier = changes.Identifier;
+        if (ValidateIdentifierArgument(identifier, "identifier") is { } inputError)
+            return Refused(manifestPath, identifier, null, inputError);
+
+        // Key order matches the existing entries, so inserted keys land in the usual order.
+        List<(string Key, string Value)> requested = [];
+        if (!string.IsNullOrWhiteSpace(changes.Type)) requested.Add(("type", changes.Type));
+        if (!string.IsNullOrWhiteSpace(changes.File)) requested.Add(("file", changes.File));
+        if (!string.IsNullOrWhiteSpace(changes.Description)) requested.Add(("description", changes.Description));
+        if (requested.Count == 0)
+            return Refused(manifestPath, identifier, null, "Nothing to update: give a new description, file or type.");
+
+        if (changes.File is { } newFile && !string.IsNullOrWhiteSpace(newFile)
+            && ResolveSectionFilePath(layoutsPath, layoutId, newFile) is null)
+        {
+            return Refused(manifestPath, identifier, null, $"{OutsideLayoutMessage(newFile, layoutId)}.");
+        }
+
+        if (await LoadManifestAsync(manifestPath, layoutsPath) is not { } manifest)
+            return Refused(manifestPath, identifier, null, ManifestNotFoundMessage(manifestPath));
+
+        if (RegistryShapeError(manifest) is { } shapeError)
+            return Refused(manifestPath, identifier, null, shapeError);
+
+        JsonArray? registry = GetRegistry(manifest);
+        (int index, string? lookupError) = LocateEntry(manifest, registry, identifier);
+        if (lookupError is not null)
+            return Refused(manifestPath, identifier, null, lookupError);
+
+        JsonObject entry = registry![index]!.AsObject();
+        JsonObject before = entry.DeepClone().AsObject();
+
+        // Only values that actually differ are changed; the rest of the request is a no-op.
+        List<(string Key, string Value)> edits = [];
+        JsonArray patch = [];
+        foreach ((string key, string value) in requested)
+        {
+            bool exists = entry.ContainsKey(key);
+            if (exists && entry[key] is JsonValue current && current.TryGetValue(out string? text) && text == value)
+                continue;
+
+            string pointer = $"{RegistryPointer}/{index}/{key}";
+            patch.Add(exists ? ReplaceOp(pointer, value) : AddOp(pointer, JsonValue.Create(value)!));
+            entry[key] = value;
+            edits.Add((key, value));
+        }
+
+        List<string> warnings = [];
+        if (edits.Any(edit => edit.Key == "file"))
+        {
+            SectionFile sectionFile = await ReadSectionFileAsync(layoutsPath, layoutId, EntryFile(entry, identifier), ct);
+            if (sectionFile.Identifier?.Value != identifier)
+                warnings.Add(SectionFileMismatchMessage(sectionFile, identifier));
+        }
+
+        if (edits.Count == 0)
+        {
+            // Already up to date: report success without touching the file.
+            return new SectionMutationResult(
+                Success: true,
+                ManifestPath: manifestPath,
+                Identifier: identifier,
+                NewIdentifier: null,
+                Before: before,
+                After: entry.DeepClone().AsObject(),
+                Patch: [],
+                References: [],
+                FilesChanged: [],
+                Errors: [],
+                Warnings: [.. warnings, $"Section '{identifier}' already has these values; nothing was changed."]);
+        }
+
+        // Splice even under --dry-run, so a dry run refuses exactly what the real run would.
+        (byte[]? updated, string? spliceError) = await SpliceManifestAsync(manifestPath, manifest, index, edits, ct);
+        if (spliceError is not null)
+            return Refused(manifestPath, identifier, null, spliceError, before);
+
+        if (!dryRun)
+        {
+            try
+            {
+                await _fileService.WriteAllBytesAsync(manifestPath, updated!, ct);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogError(ex, "Could not write {Manifest}.", manifestPath);
+                return Refused(manifestPath, identifier, null, $"Failed to write {manifestPath}: {ex.Message}", before);
+            }
+
+            _logger.LogInformation(
+                "Section registry: updated {Fields} of '{Identifier}' in {Layout}.",
+                string.Join(", ", edits.Select(edit => edit.Key)), identifier, layoutId);
+        }
+
+        return new SectionMutationResult(
+            Success: true,
+            ManifestPath: manifestPath,
+            Identifier: identifier,
+            NewIdentifier: null,
+            Before: before,
+            After: entry.DeepClone().AsObject(),
+            Patch: patch,
+            References: [],
+            FilesChanged: [manifestPath],
+            Errors: [],
+            Warnings: warnings);
+    }
+
+    /// <summary>
+    /// Reads the manifest's raw bytes and splices <paramref name="edits"/> into registry entry
+    /// <paramref name="index"/>, then proves the result parses to <paramref name="expected"/>.
+    /// </summary>
+    /// <returns>The new file bytes, or an error saying why the update cannot be made in place.</returns>
+    private async Task<(byte[]? Content, string? Error)> SpliceManifestAsync(
+        string manifestPath,
+        JsonObject expected,
+        int index,
+        IReadOnlyList<(string Key, string Value)> edits,
+        CancellationToken ct)
+    {
+        byte[] original;
+        try
+        {
+            original = await _fileService.ReadAllBytesAsync(manifestPath, ct);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return (null, $"Failed to read {manifestPath}: {ex.Message}");
+        }
+
+        byte[]? updated;
+        try
+        {
+            updated = SpliceRegistryEntry(original, index, edits);
+        }
+        catch (JsonException)
+        {
+            updated = null;
+        }
+
+        bool matches;
+        try
+        {
+            matches = updated is not null
+                && JsonNode.DeepEquals(JsonNode.Parse(updated.AsSpan().StartsWith(Utf8Bom) ? updated[Utf8Bom.Length..] : updated), expected);
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+        {
+            matches = false;
+        }
+
+        return matches
+            ? (updated, null)
+            : (null, $"{manifestPath} could not be updated in place without changing anything else "
+                   + "(it may have changed on disk since it was read). Nothing was written.");
+    }
+
+    /// <summary>
+    /// Returns <paramref name="utf8Json"/> with each edit applied to the object at
+    /// <c>/entities/sections/{index}</c>: an existing key's value bytes are replaced; a missing
+    /// key is inserted after the entry's last property, copying that property's leading
+    /// whitespace and name/value separator, so a one-line entry stays on one line and a
+    /// multi-line one gets a new line at the same indent. Every other byte is untouched. Returns
+    /// <c>null</c> when the path cannot be found. A leading UTF-8 BOM is kept.
+    /// </summary>
+    internal static byte[]? SpliceRegistryEntry(byte[] utf8Json, int index, IReadOnlyList<(string Key, string Value)> edits)
+    {
+        int offset = utf8Json.AsSpan().StartsWith(Utf8Bom) ? Utf8Bom.Length : 0;
+        Utf8JsonReader reader = new(utf8Json.AsSpan(offset));
+
+        if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject
+            || !SeekProperty(ref reader, "entities"u8) || reader.TokenType != JsonTokenType.StartObject
+            || !SeekProperty(ref reader, "sections"u8) || reader.TokenType != JsonTokenType.StartArray)
+        {
+            return null;
+        }
+
+        for (int i = 0; ; i++)
+        {
+            if (!reader.Read() || reader.TokenType == JsonTokenType.EndArray) return null;
+            if (i == index) break;
+            reader.Skip();
+        }
+        if (reader.TokenType != JsonTokenType.StartObject) return null;
+
+        // Every property of the entry, as absolute byte ranges.
+        Dictionary<string, (int ValueStart, int ValueEnd)> values = [];
+        int lastNameStart = -1, lastNameEnd = -1, lastValueStart = -1, lastValueEnd = -1;
+        while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
+        {
+            string name = reader.GetString()!;
+            int nameStart = offset + (int)reader.TokenStartIndex;
+            int nameEnd = nameStart + reader.ValueSpan.Length + 2;
+            reader.Read();
+            int valueStart = offset + (int)reader.TokenStartIndex;
+            reader.Skip();
+            int valueEnd = offset + (int)reader.BytesConsumed;
+
+            values[name] = (valueStart, valueEnd);
+            (lastNameStart, lastNameEnd, lastValueStart, lastValueEnd) = (nameStart, nameEnd, valueStart, valueEnd);
+        }
+        if (lastNameStart < 0) return null;
+
+        int gapStart = lastNameStart;
+        while (gapStart > 0 && utf8Json[gapStart - 1] is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n')
+            gapStart--;
+        byte[] gap = utf8Json[gapStart..lastNameStart];
+        byte[] separator = utf8Json[lastNameEnd..lastValueStart];
+
+        List<(int Start, int End, byte[] Bytes)> splices = [];
+        List<byte> inserted = [];
+        foreach ((string key, string value) in edits)
+        {
+            byte[] encodedValue = JsonSerializer.SerializeToUtf8Bytes(value, IdentifierTokenOptions);
+            if (values.TryGetValue(key, out (int ValueStart, int ValueEnd) range))
+            {
+                splices.Add((range.ValueStart, range.ValueEnd, encodedValue));
+            }
+            else
+            {
+                inserted.Add((byte)',');
+                inserted.AddRange(gap);
+                inserted.AddRange(JsonSerializer.SerializeToUtf8Bytes(key, IdentifierTokenOptions));
+                inserted.AddRange(separator);
+                inserted.AddRange(encodedValue);
+            }
+        }
+        if (inserted.Count > 0)
+            splices.Add((lastValueEnd, lastValueEnd, [.. inserted]));
+
+        // Last first, so earlier offsets stay valid. An insertion sits at the last value's end,
+        // after any replacement of that value, so it sorts first among equal ends.
+        byte[] result = utf8Json;
+        foreach ((int start, int end, byte[] bytes) in splices.OrderByDescending(s => s.Start))
+            result = [.. result[..start], .. bytes, .. result[end..]];
+        return result;
+    }
+
+    /// <summary>
+    /// From a reader positioned on a <c>StartObject</c>, advances to the value of the first
+    /// property named <paramref name="name"/> at that level. Returns false when there is none.
+    /// </summary>
+    private static bool SeekProperty(ref Utf8JsonReader reader, ReadOnlySpan<byte> name)
+    {
+        while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
+        {
+            bool isMatch = reader.ValueTextEquals(name);
+            reader.Read();
+            if (isMatch) return true;
+            reader.Skip();
+        }
+        return false;
     }
 
     // ───── references ─────

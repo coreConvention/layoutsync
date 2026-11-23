@@ -9,7 +9,8 @@ namespace LayoutSync.Mcp.Tools;
 /// <summary>
 /// MCP tools that change a layout manifest's <c>entities.sections</c> registry. Each tool
 /// delegates to <see cref="ManifestSectionRegistryService"/> (the same service behind the
-/// CLI's <c>manifest add-section</c> / <c>rename-section</c> / <c>remove-section</c>), so
+/// CLI's <c>manifest add-section</c> / <c>update-section</c> / <c>rename-section</c> /
+/// <c>remove-section</c>), so
 /// validation is identical on both surfaces, and responses use the CLI's <c>--json</c>
 /// envelope via <see cref="JsonOutputFormatter"/>.
 ///
@@ -64,6 +65,47 @@ public sealed class ManifestSectionTools(
             dryRun);
 
         return FormatEnvelope("manifest add-section", layoutId, dryRun, target, result);
+    }
+
+    [McpServerTool(Name = "manifest_update_section")]
+    [Description(
+        "Change an existing entities.sections entry's description, file and/or type in place. The entry keeps "
+        + "its position in the registry and every key not given; only the changed values are rewritten in the "
+        + "file, so the rest of the manifest keeps its formatting. Refuses an undeclared identifier and a call "
+        + "that gives no field. Warns when a new file is missing or declares another identifier. Dry-run first. "
+        + "Returns a JSON envelope with 'before', 'after', the RFC 6902 patch, the files changed, warnings and errors."
+        + LayoutsPathProvider.WriteToolNote)]
+    public async Task<string> ManifestUpdateSection(
+        [Description("Layout id (e.g. 'dirt-life').")]
+        string layoutId,
+
+        [Description("The declared section identifier whose entry to change.")]
+        string identifier,
+
+        [Description("Optional new description. Omit or leave blank to keep the current one.")]
+        string? description = null,
+
+        [Description("Optional new section file, relative to the layout directory. Omit to keep the current one.")]
+        string? file = null,
+
+        [Description("Optional new section type. Omit to keep the current one.")]
+        string? type = null,
+
+        [Description("If true, compute the change but do not write any file. Default: false.")]
+        bool dryRun = false,
+
+        [Description(LayoutsPathProvider.ParameterDescription)]
+        string? layoutsPath = null)
+    {
+        ResolvedLayoutsPath target = _pathProvider.Resolve(layoutsPath);
+
+        SectionMutationResult result = await _service.UpdateSectionAsync(
+            target.LayoutsPath,
+            layoutId,
+            new SectionEntryInput(identifier, type, file, description),
+            dryRun);
+
+        return FormatEnvelope("manifest update-section", layoutId, dryRun, target, result);
     }
 
     [McpServerTool(Name = "manifest_rename_section")]

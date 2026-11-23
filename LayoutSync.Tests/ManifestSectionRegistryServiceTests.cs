@@ -595,6 +595,220 @@ public class ManifestSectionRegistryServiceTests : IDisposable
         Assert.Contains("not found", Assert.Single(result.Errors));
     }
 
+    // ───── update (issue #69) ─────
+
+    [Fact]
+    public async Task UpdateSection_ChangesTheDescriptionInPlace_LeavingEveryOtherByteAlone()
+    {
+        WriteStandardLayout();
+        string original = File.ReadAllText(ManifestPath());
+
+        SectionMutationResult result = await _service.UpdateSectionAsync(
+            _layoutsPath, LayoutId, new SectionEntryInput("event-list", Description: "Upcoming events, soonest first"), dryRun: false);
+
+        Assert.True(result.Success);
+        Assert.Empty(result.Warnings);
+        Assert.Equal("Event list", result.Before!["description"]?.GetValue<string>());
+        Assert.Equal("Upcoming events, soonest first", result.After!["description"]?.GetValue<string>());
+        JsonObject op = Assert.Single(result.Patch!)!.AsObject();
+        Assert.Equal("replace", op["op"]?.GetValue<string>());
+        Assert.Equal("/entities/sections/3/description", op["path"]?.GetValue<string>());
+        Assert.Equal([ManifestPath()], result.FilesChanged);
+
+        string written = File.ReadAllText(ManifestPath());
+        Assert.Equal(
+            original.Replace("\"description\": \"Event list\"", "\"description\": \"Upcoming events, soonest first\""),
+            written);
+        AssertPatchReproduces(original, result.Patch!, written);
+    }
+
+    [Fact]
+    public async Task UpdateSection_KeepsCompactBlocksAndInsertsAMissingKeyAtTheEntrysIndent()
+    {
+        // The shape from w31rd PR 6046: a one-line-object themes.set array that a full
+        // re-serialize expands, and a multi-line entry with no description yet.
+        const string manifest = "{\r\n"
+            + "  \"identifier\": \"test-layout\",\r\n"
+            + "  \"themes\": {\r\n"
+            + "    \"set\": [\r\n"
+            + "      { \"id\": \"light\", \"role\": \"light\" },\r\n"
+            + "      { \"id\": \"dark\", \"role\": \"dark\" }\r\n"
+            + "    ]\r\n"
+            + "  },\r\n"
+            + "  \"entities\": {\r\n"
+            + "    \"sections\": [\r\n"
+            + "      {\r\n"
+            + "        \"identifier\": \"home\",\r\n"
+            + "        \"type\": \"ui-schema-section\",\r\n"
+            + "        \"file\": \"sections/home.json\"\r\n"
+            + "      },\r\n"
+            + "      { \"identifier\": \"about\", \"type\": \"ui-schema-section\", \"file\": \"sections/about.json\" }\r\n"
+            + "    ]\r\n"
+            + "  }\r\n"
+            + "}";
+        WriteManifest(manifest);
+
+        SectionMutationResult home = await _service.UpdateSectionAsync(
+            _layoutsPath, LayoutId, new SectionEntryInput("home", Description: "Landing page"), dryRun: false);
+        SectionMutationResult about = await _service.UpdateSectionAsync(
+            _layoutsPath, LayoutId, new SectionEntryInput("about", Description: "About us"), dryRun: false);
+
+        Assert.True(home.Success);
+        Assert.True(about.Success);
+        Assert.Equal("add", home.Patch![0]!["op"]?.GetValue<string>());
+        Assert.Equal("/entities/sections/0/description", home.Patch[0]!["path"]?.GetValue<string>());
+        string expected = manifest
+            .Replace(
+                "        \"file\": \"sections/home.json\"\r\n",
+                "        \"file\": \"sections/home.json\",\r\n        \"description\": \"Landing page\"\r\n")
+            .Replace(
+                "\"file\": \"sections/about.json\" }",
+                "\"file\": \"sections/about.json\", \"description\": \"About us\" }");
+        Assert.Equal(expected, File.ReadAllText(ManifestPath()));
+    }
+
+    [Fact]
+    public async Task UpdateSection_SetsFileAndTypeAndWarnsWhenTheNewFileIsMissing()
+    {
+        WriteStandardLayout();
+        string original = File.ReadAllText(ManifestPath());
+
+        SectionMutationResult result = await _service.UpdateSectionAsync(
+            _layoutsPath, LayoutId,
+            new SectionEntryInput("event-list", Type: "custom-type", File: "sections/events.json"),
+            dryRun: false);
+
+        Assert.True(result.Success);
+        Assert.Contains("does not exist", Assert.Single(result.Warnings));
+        Assert.Equal(2, result.Patch!.Count);
+        Assert.Equal("custom-type", result.After!["type"]?.GetValue<string>());
+        Assert.Equal("sections/events.json", result.After["file"]?.GetValue<string>());
+        // Position kept: still the fourth entry, identifier untouched.
+        JsonObject entry = ReadManifest()["entities"]!["sections"]![3]!.AsObject();
+        Assert.Equal("event-list", entry["identifier"]?.GetValue<string>());
+        Assert.Equal("Event list", entry["description"]?.GetValue<string>());
+        AssertPatchReproduces(original, result.Patch, File.ReadAllText(ManifestPath()));
+    }
+
+    [Fact]
+    public async Task UpdateSection_DryRun_ReportsTheChangeAndWritesNothing()
+    {
+        WriteStandardLayout();
+        string original = File.ReadAllText(ManifestPath());
+
+        SectionMutationResult result = await _service.UpdateSectionAsync(
+            _layoutsPath, LayoutId, new SectionEntryInput("event-list", Description: "New"), dryRun: true);
+
+        Assert.True(result.Success);
+        Assert.Single(result.Patch!);
+        Assert.Equal([ManifestPath()], result.FilesChanged);
+        Assert.Equal(original, File.ReadAllText(ManifestPath()));
+    }
+
+    [Fact]
+    public async Task UpdateSection_RefusesAnUndeclaredIdentifierWithASuggestion()
+    {
+        WriteStandardLayout();
+        string original = File.ReadAllText(ManifestPath());
+
+        SectionMutationResult result = await _service.UpdateSectionAsync(
+            _layoutsPath, LayoutId, new SectionEntryInput("event-lst", Description: "x"), dryRun: false);
+
+        Assert.False(result.Success);
+        string error = Assert.Single(result.Errors);
+        Assert.Contains("not declared", error);
+        Assert.Contains("event-list", error);
+        Assert.Null(result.Patch);
+        Assert.Empty(result.FilesChanged);
+        Assert.Equal(original, File.ReadAllText(ManifestPath()));
+    }
+
+    [Fact]
+    public async Task UpdateSection_RefusesACallThatNamesNoField()
+    {
+        WriteStandardLayout();
+
+        SectionMutationResult result = await _service.UpdateSectionAsync(
+            _layoutsPath, LayoutId, new SectionEntryInput("event-list", Description: " "), dryRun: false);
+
+        Assert.False(result.Success);
+        Assert.Contains("Nothing to update", Assert.Single(result.Errors));
+    }
+
+    [Fact]
+    public async Task UpdateSection_RefusesAFileOutsideTheLayout()
+    {
+        WriteStandardLayout();
+
+        SectionMutationResult result = await _service.UpdateSectionAsync(
+            _layoutsPath, LayoutId, new SectionEntryInput("event-list", File: "../other/sections/x.json"), dryRun: false);
+
+        Assert.False(result.Success);
+        Assert.Contains("resolves outside", Assert.Single(result.Errors));
+    }
+
+    [Fact]
+    public async Task UpdateSection_SameValues_SucceedWithoutWriting()
+    {
+        WriteStandardLayout();
+        DateTime writtenAt = File.GetLastWriteTimeUtc(ManifestPath());
+
+        SectionMutationResult result = await _service.UpdateSectionAsync(
+            _layoutsPath, LayoutId, new SectionEntryInput("event-list", Description: "Event list"), dryRun: false);
+
+        Assert.True(result.Success);
+        Assert.Empty(result.Patch!);
+        Assert.Empty(result.FilesChanged);
+        Assert.Contains("nothing was changed", Assert.Single(result.Warnings));
+        Assert.Equal(writtenAt, File.GetLastWriteTimeUtc(ManifestPath()));
+    }
+
+    [Fact]
+    public async Task UpdateSection_RefusesInsteadOfWritingWhenTheSpliceWouldNotMatch()
+    {
+        // The manifest changes on disk between the parse and the raw read (another writer):
+        // the spliced bytes no longer mean what the parsed edit means, so nothing is written.
+        WriteStandardLayout();
+        string original = File.ReadAllText(ManifestPath());
+        string manifestPath = ManifestPath();
+        bool written = false;
+        ManifestSectionRegistryService service = ServiceWith(new ChangedOnDiskFileService(
+            manifestPath,
+            Encoding.UTF8.GetBytes(original.Replace("\"Sidebar summary\"", "\"Edited elsewhere\"")),
+            onWrite: () => written = true));
+
+        SectionMutationResult result = await service.UpdateSectionAsync(
+            _layoutsPath, LayoutId, new SectionEntryInput("event-list", Description: "c"), dryRun: false);
+
+        Assert.False(result.Success);
+        Assert.Contains("could not be updated in place", Assert.Single(result.Errors));
+        Assert.False(written);
+        Assert.Equal(original, File.ReadAllText(ManifestPath()));
+    }
+
+    [Fact]
+    public void SpliceRegistryEntry_KeepsTheBomAndWritesCharactersLiterally()
+    {
+        byte[] json = [0xEF, 0xBB, 0xBF, .. """{"entities":{"sections":[{"identifier":"a","description":"full\/width"}]}}"""u8];
+
+        byte[]? spliced = ManifestSectionRegistryService.SpliceRegistryEntry(
+            json, 0, [("description", "Tom's café + more")]);
+
+        Assert.Equal(
+            [0xEF, 0xBB, 0xBF, .. """{"entities":{"sections":[{"identifier":"a","description":"Tom's café + more"}]}}"""u8],
+            spliced);
+    }
+
+    [Theory]
+    [InlineData("""{"entities":{"sections":[]}}""")]
+    [InlineData("""{"entities":{}}""")]
+    [InlineData("""{"entities":{"sections":["home"]}}""")]
+    public void SpliceRegistryEntry_ReturnsNullWhenTheEntryIsNotThere(string json)
+    {
+        Assert.Null(ManifestSectionRegistryService.SpliceRegistryEntry(
+            Encoding.UTF8.GetBytes(json), 0, [("description", "x")]));
+    }
+
     // ───── remove ─────
 
     [Fact]
@@ -847,6 +1061,23 @@ public class ManifestSectionRegistryServiceTests : IDisposable
             => writeFault?.Invoke(filePath) is { } ex
                 ? Task.FromException(ex)
                 : base.WriteAllBytesAsync(filePath, content, ct);
+    }
+
+    /// <summary>
+    /// Serves <paramref name="rawBytes"/> for raw reads of <paramref name="path"/>, as if another
+    /// writer changed the file after it was parsed, and records any raw write.
+    /// </summary>
+    private sealed class ChangedOnDiskFileService(string path, byte[] rawBytes, Action onWrite)
+        : LocalFileService(NullLogger<LocalFileService>.Instance)
+    {
+        public override Task<byte[]> ReadAllBytesAsync(string filePath, CancellationToken ct = default)
+            => filePath == path ? Task.FromResult(rawBytes) : base.ReadAllBytesAsync(filePath, ct);
+
+        public override Task WriteAllBytesAsync(string filePath, byte[] content, CancellationToken ct = default)
+        {
+            onWrite();
+            return base.WriteAllBytesAsync(filePath, content, ct);
+        }
     }
 
     /// <summary>

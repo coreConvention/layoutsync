@@ -47,7 +47,7 @@ namespace LayoutSync.Configuration;
 /// section file a rename rewrote:
 /// <code>
 /// {
-///   "command":       "manifest add-section" | "manifest rename-section" | "manifest remove-section",
+///   "command":       "manifest add-section" | "manifest update-section" | "manifest rename-section" | "manifest remove-section",
 ///   "layoutId":      "cream-pi",
 ///   "manifestPath":  "/abs/path/layouts/cream-pi/manifests/layout-manifest.json" | null,
 ///   "dryRun":        true | false,

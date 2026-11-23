@@ -424,8 +424,9 @@ public class McpToolsTests : IDisposable
             .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
             .ToArray();
 
-        // 5 route/read tools (#29) + 3 section-registry tools (#30) + manifest_remove_route (#64).
-        Assert.Equal(9, toolMethods.Length);
+        // 5 route/read tools (#29) + 3 section-registry tools (#30) + manifest_remove_route (#64)
+        // + manifest_update_section (#69).
+        Assert.Equal(10, toolMethods.Length);
         foreach (MethodInfo method in toolMethods)
         {
             ParameterInfo? parameter = method.GetParameters().SingleOrDefault(p => p.Name == "layoutsPath");
@@ -551,6 +552,28 @@ public class McpToolsTests : IDisposable
         Assert.Equal("sections/new-section.json", envelope["after"]?["file"]?.GetValue<string>());
         // The fixture has no section files on disk, so the missing file is flagged.
         Assert.Contains("does not exist", Assert.Single(envelope["warnings"]!.AsArray())!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ManifestUpdateSection_ReturnsEnvelopeWithBeforeAndAfter()
+    {
+        WriteFixture();
+        ManifestSectionTools tools = new(_registryService, _pathProvider);
+
+        string output = await tools.ManifestUpdateSection(
+            LayoutId, "sidebar-layout", description: "Two-column layout", dryRun: true, layoutsPath: _layoutsPath);
+        JsonObject envelope = JsonNode.Parse(output)!.AsObject();
+
+        Assert.Equal("manifest update-section", envelope["command"]?.GetValue<string>());
+        Assert.Equal(ManifestPathIn(_layoutsPath), envelope["manifestPath"]?.GetValue<string>());
+        Assert.True(envelope["success"]?.GetValue<bool>());
+        Assert.Equal("Two-column layout", envelope["after"]?["description"]?.GetValue<string>());
+        Assert.Equal("sidebar-layout", envelope["after"]?["identifier"]?.GetValue<string>());
+        Assert.Single(envelope["patch"]!.AsArray());
+        Assert.Single(envelope["filesChanged"]!.AsArray());
+        Assert.Empty(envelope["errors"]!.AsArray());
+        // The dry run left the file alone.
+        Assert.Equal(StandardFixture, File.ReadAllText(ManifestPathIn(_layoutsPath)));
     }
 
     [Fact]
