@@ -24,6 +24,17 @@ public class LocalFileService(ILogger<LocalFileService> logger)
     };
 
     /// <summary>
+    /// A repeated property is refused at parse time, like any other invalid JSON (#71).
+    /// <see cref="JsonNode.Parse(string, JsonNodeOptions?, JsonDocumentOptions)"/> accepts one by
+    /// default and <see cref="JsonObject"/> keeps both values until the first lookup into that
+    /// object throws an <see cref="ArgumentException"/>, so the failure surfaced later, in
+    /// whichever caller touched it first: a manifest operation crashed past its refusal
+    /// envelope, and the sync failed the file as unreadable only when the repeat was in the
+    /// root object (which this reader indexes), leaving a deeper one to whatever came next.
+    /// </summary>
+    private static readonly JsonDocumentOptions ReadOptions = new() { AllowDuplicateProperties = false };
+
+    /// <summary>
     /// Reads a JSON file and parses it into a SyncDocument.
     /// </summary>
     public async Task<SyncDocument?> ReadDocumentAsync(string filePath, string layoutsBasePath)
@@ -37,7 +48,7 @@ public class LocalFileService(ILogger<LocalFileService> logger)
             }
 
             string json = await File.ReadAllTextAsync(filePath);
-            JsonObject? content = JsonNode.Parse(json)?.AsObject();
+            JsonObject? content = JsonNode.Parse(json, documentOptions: ReadOptions)?.AsObject();
 
             if (content == null)
             {

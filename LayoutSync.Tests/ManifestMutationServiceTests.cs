@@ -520,6 +520,34 @@ public class ManifestMutationServiceTests : IDisposable
         Assert.Equal(ManifestPath(), result.ManifestPath);
     }
 
+    [Fact]
+    public async Task RouteOperations_RefuseAManifestThatRepeatsAProperty()
+    {
+        // Issue #71: a repeated property used to parse, then crash the first lookup into
+        // that object with an unhandled ArgumentException instead of a refusal.
+        const string manifest = """
+            {
+              "identifier": "test-layout",
+              "routeConfigs": {
+                "/events": { "structuralSection": "full-width-layout", "structuralSection": "other" }
+              }
+            }
+            """;
+        WriteFixture(manifest);
+        string original = File.ReadAllText(ManifestPath());
+
+        MutationResult set = await _service.SetRouteAsync(
+            _layoutsPath, LayoutId, new RoutePatchInput(Route: "/events", StructuralSection: "x"), dryRun: false);
+        MutationResult removed = await _service.RemoveRouteAsync(_layoutsPath, LayoutId, "/events", dryRun: false);
+
+        Assert.All([set, removed], result =>
+        {
+            Assert.False(result.Success);
+            Assert.Contains("not found or unparseable", Assert.Single(result.Errors));
+        });
+        Assert.Equal(original, File.ReadAllText(ManifestPath()));
+    }
+
     // ───── helpers ─────
 
     private JsonObject ReadManifest() => JsonNode.Parse(File.ReadAllText(ManifestPath()))!.AsObject();
