@@ -1045,7 +1045,7 @@ public class ManifestSectionRegistryService(
     {
         try
         {
-            await _fileService.WriteDocumentAsync(manifestPath, manifest);
+            await _fileService.WriteManifestAsync(manifestPath, manifest);
             return null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
