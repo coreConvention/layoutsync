@@ -162,14 +162,34 @@ public class LocalFileService(ILogger<LocalFileService> logger)
     /// <see cref="FormatPreservingJsonWriter"/>). Used for the layout manifest, which only the
     /// manifest tools write; synced documents still go through <see cref="WriteDocumentAsync"/>.
     /// </summary>
+    /// <param name="filePath">The manifest file.</param>
+    /// <param name="content">The manifest as it should be after the change.</param>
+    /// <param name="asRead">
+    /// The manifest as the caller read it, before changing it. The write is refused when the
+    /// file no longer holds this document: the rewrite diffs the file's current bytes against
+    /// <paramref name="content"/>, so without this check an edit made by someone else between
+    /// the read and the write would be undone silently (issue #74).
+    /// </param>
+    /// <param name="ct">Cancellation.</param>
     /// <exception cref="IOException">
-    /// The file could not be read or written, or the change could not be made without altering
-    /// anything else (the result would not parse to <paramref name="content"/>). In that case
-    /// nothing is written.
+    /// The file could not be read or written, it no longer holds <paramref name="asRead"/>, or
+    /// the change could not be made without altering anything else (the result would not parse
+    /// to <paramref name="content"/>). In that case nothing is written.
     /// </exception>
-    public async Task WriteManifestAsync(string filePath, JsonObject content, CancellationToken ct = default)
+    public async Task WriteManifestAsync(
+        string filePath,
+        JsonObject content,
+        JsonObject asRead,
+        CancellationToken ct = default)
     {
         byte[] original = await ReadAllBytesAsync(filePath, ct);
+        if (!HoldsDocument(original, asRead))
+        {
+            throw new IOException(
+                "the file no longer holds the manifest this change was made to "
+                + "(it may have changed on disk since it was read). Nothing was written.");
+        }
+
         byte[] updated = FormatPreservingJsonWriter.Rewrite(original, content)
             ?? throw new IOException(
                 "the change could not be made without reformatting the rest of the file "
@@ -178,6 +198,28 @@ public class LocalFileService(ILogger<LocalFileService> logger)
         if (!updated.AsSpan().SequenceEqual(original))
             await WriteAllBytesAsync(filePath, updated, ct);
         _logger.LogDebug("Wrote file: {Path}", filePath);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="bytes"/> parse to <paramref name="document"/>. Compared as JSON,
+    /// not as bytes, because the caller read the file through a parse and kept no bytes: a
+    /// whitespace-only save in between changes nothing a rewrite would undo. A leading UTF-8
+    /// BOM is skipped, as <see cref="FormatPreservingJsonWriter"/> skips it.
+    /// </summary>
+    private static bool HoldsDocument(byte[] bytes, JsonObject document)
+    {
+        ReadOnlySpan<byte> json = bytes;
+        if (json.StartsWith((ReadOnlySpan<byte>)[0xEF, 0xBB, 0xBF]))
+            json = json[3..];
+
+        try
+        {
+            return JsonNode.DeepEquals(JsonNode.Parse(json), document);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     /// <summary>

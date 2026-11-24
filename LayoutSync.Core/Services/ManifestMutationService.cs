@@ -119,6 +119,9 @@ public class ManifestMutationService(
             { ManifestPath = manifestPath };
         }
 
+        // Kept unchanged so the write can refuse if the file changed after this read (#74).
+        JsonObject asRead = manifest.DeepClone().AsObject();
+
         // 3. Validate. The validator only inspects state — it doesn't mutate.
         SectionValidationResult validation = _validator.Validate(manifest, patches);
 
@@ -179,7 +182,7 @@ public class ManifestMutationService(
         {
             try
             {
-                await _fileService.WriteManifestAsync(manifestPath, manifest);
+                await _fileService.WriteManifestAsync(manifestPath, manifest, asRead);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -242,6 +245,9 @@ public class ManifestMutationService(
         if (manifestDoc?.Content is not JsonObject manifest)
             return RemoveRouteRefused(manifestPath, $"Manifest not found or unparseable at {manifestPath}.");
 
+        // Kept unchanged so the write can refuse if the file changed after this read (#74).
+        JsonObject asRead = manifest.DeepClone().AsObject();
+
         // Unlike set-route, never create routeConfigs: a manifest without one has no route to remove.
         JsonObject? routeConfigs = manifest["routeConfigs"] as JsonObject;
         if (routeConfigs is null || !routeConfigs.ContainsKey(route))
@@ -268,7 +274,7 @@ public class ManifestMutationService(
         {
             try
             {
-                await _fileService.WriteManifestAsync(manifestPath, manifest);
+                await _fileService.WriteManifestAsync(manifestPath, manifest, asRead);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {

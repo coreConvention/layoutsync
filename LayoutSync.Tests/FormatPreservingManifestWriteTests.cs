@@ -401,7 +401,7 @@ public class FormatPreservingManifestWriteTests : IDisposable
         File.WriteAllText(_manifestPath, "{ broken");
 
         IOException error = await Assert.ThrowsAsync<IOException>(
-            () => fileService.WriteManifestAsync(_manifestPath, new JsonObject { ["a"] = 1 }));
+            () => fileService.WriteManifestAsync(_manifestPath, new JsonObject { ["a"] = 1 }, new JsonObject()));
 
         Assert.Contains("Nothing was written", error.Message, StringComparison.Ordinal);
         Assert.Equal("{ broken", File.ReadAllText(_manifestPath));
